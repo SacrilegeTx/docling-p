@@ -427,5 +427,5 @@ The repository is intentionally small:
 
 ## License
 
-Add a license before publishing the repository publicly. If you want others to
-reuse the script, choose a permissive license such as MIT or Apache 2.0.
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE) for
+details.
