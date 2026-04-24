@@ -1,0 +1,11 @@
+[project]
+name = "docling-p"
+version = "0.1.0"
+description = "Convert PDF and office documents to Markdown with Docling"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "docling>=2.91.0",
+    "pypdf>=6.10.2",
+    "python-dotenv>=1.1.1",
+]
