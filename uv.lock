@@ -357,6 +357,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "docling" },
+    { name = "lxml" },
     { name = "pypdf" },
     { name = "python-dotenv" },
 ]
@@ -364,6 +365,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "docling", specifier = ">=2.91.0" },
+    { name = "lxml", specifier = ">=4.9" },
     { name = "pypdf", specifier = ">=6.10.2" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
 ]

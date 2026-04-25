@@ -11,6 +11,7 @@ wheels/
 
 # Local environment variables
 .env
+.venv
 
 # Local agent memory
 .engram/

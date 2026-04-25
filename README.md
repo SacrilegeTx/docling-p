@@ -27,6 +27,11 @@ That configuration was chosen for born-digital PDFs where text and tables are
 already embedded in the document. It reduces memory pressure and avoids the OCR
 pipeline when OCR doesn't add value.
 
+After Docling produces Markdown, the script runs a post-processing pipeline
+that restructures tables of the form "row number | description | XML example"
+that Docling collapsed into a single-line code block, and pretty-prints any
+XML found in fenced code blocks. See [Post-processing pipeline](#post-processing-pipeline).
+
 ## Supported input files
 
 Docling supports several document formats. In practical terms, this script is
@@ -55,6 +60,7 @@ You need the following tools and configuration:
 The project dependencies are declared in `pyproject.toml`:
 
 - `docling`
+- `lxml`
 - `pypdf`
 - `python-dotenv`
 
@@ -239,15 +245,17 @@ For PDF files, the script uses this flow:
 3. Split the document into one-page chunks.
 4. Convert each chunk with Docling.
 5. Retry each chunk up to two times when conversion fails.
-6. Append each converted chunk to a temporary `.partial.md` file.
-7. Copy the completed partial file to the final output path.
-8. Remove the temporary folder.
+6. Run the post-processing pipeline on each converted chunk's Markdown.
+7. Append each converted chunk to a temporary `.partial.md` file.
+8. Copy the completed partial file to the final output path.
+9. Remove the temporary folder.
 
 For non-PDF files, the script uses this flow:
 
 1. Send the document directly to `DocumentConverter`.
 2. Export the converted document to Markdown.
-3. Write the Markdown to the output path.
+3. Run the post-processing pipeline on the resulting Markdown.
+4. Write the Markdown to the output path.
 
 This split keeps the PDF workflow resilient while keeping other document types
 simple.
@@ -327,6 +335,47 @@ In other words: don't tune these values blindly. If the document is already
 text-based, OCR and heavier table analysis can add cost without improving the
 Markdown enough to justify the risk.
 
+## Post-processing pipeline
+
+After Docling exports Markdown, the script applies two transformations before
+writing the file. Both transformations are idempotent and conservative: a block
+that does not match the expected pattern passes through unchanged.
+
+### Phase 1: Restructure flattened "row + description + XML" tables
+
+Some documents contain tables shaped as `row number | description | XML example`
+where each cell is wide (often because the XML cell holds many lines). When the
+layout detector cannot identify the region as a table, Docling emits the rows
+as a single fenced code block with everything concatenated into one line.
+
+The script detects that pattern and re-segments each block into individual rows.
+For every detected row (or row group, when the original table used rowspan) it
+emits:
+
+- A `### Fila N` (or `### Filas N1, N2, ...`) heading.
+- The row description as plain text.
+- A separate ` ```xml ` fenced block with that row's XML example.
+
+This preserves the row-to-XML mapping and keeps each example searchable with
+tools like `rg`.
+
+### Phase 2: Pretty-print fenced XML blocks
+
+Every fenced code block whose content looks like XML (starts with `<` and
+contains `</` or `/>`) is reformatted with one tag per line and consistent
+indentation. The pretty-printer uses `lxml` with a recovering parser so it
+tolerates fragments without a single root element, OCR artifacts, and
+unescaped characters that would break a strict XML parser. If `lxml` cannot
+recover anything from the block, the script falls back to a regex-based
+pretty-printer that does not validate the structure.
+
+### When the pipeline does nothing
+
+Both transformations only act on fenced code blocks that match their detection
+heuristics. Plain Markdown tables, prose, and code blocks for non-XML content
+are left untouched. If your document does not contain XML examples or
+flattened table-like blocks, the post-processing step is a no-op.
+
 ## Windows notes
 
 Use quotes around Windows paths because document names often contain spaces:
@@ -368,8 +417,11 @@ significantly.
 
 ### Tables don't look perfect in Markdown
 
-Markdown has limited table layout support. Complex tables from PDFs or
-spreadsheets may need manual cleanup after conversion.
+Markdown has limited table layout support. Tables with very wide cells,
+nested headers, or merged cells may still need manual cleanup. The
+post-processing pipeline already handles the worst case — tables that
+Docling collapsed into a single-line code block with embedded XML examples
+— so check those first before assuming a table is irrecoverable.
 
 ### `uv run` fails in WSL with a Windows `.venv`
 
@@ -396,7 +448,8 @@ from the old Windows virtual environment. Stop that process first, then delete
 The script focuses on reliable Markdown extraction, not pixel-perfect document
 reconstruction. Keep these limitations in mind:
 
-- Complex PDF layouts may require manual Markdown cleanup.
+- Complex PDF layouts may still require manual Markdown cleanup, even after
+  the post-processing pipeline.
 - Scanned PDFs are not handled by the default PDF settings because OCR is
   disabled.
 - Non-PDF files are converted directly and don't have chunk-level retry logic.

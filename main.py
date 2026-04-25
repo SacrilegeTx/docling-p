@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -91,6 +92,179 @@ def build_pdf_converter() -> DocumentConverter:
     )
 
 
+from lxml import etree
+
+_FENCED_BLOCK_RE = re.compile(r"```([^\n]*)\n(.*?)\n```", re.DOTALL)
+_ROW_MARKER_RE = re.compile(r"(?<!\S)(\d+(?:\s+\d+)*)\s+(?=[A-ZÁÉÍÓÚÑ])")
+_TABLE_BLOCK_GUARD_RE = re.compile(r"^\s*(?:\d+\s+)+[A-ZÁÉÍÓÚÑ]")
+_XML_DECL_RE = re.compile(r"^\s*<\?xml[^?]*\?>\s*", re.DOTALL)
+
+
+def _is_inside_xml_tag(text: str, pos: int) -> bool:
+    return text.rfind("<", 0, pos) > text.rfind(">", 0, pos)
+
+
+def restructure_xml_table_block(content: str) -> str | None:
+    # Cuando docling no logra detectar una tabla de la forma
+    # "número | descripción | XML", la aplasta a un único CodeItem con todas
+    # las filas concatenadas en una sola línea. Detectamos ese patrón y la
+    # re-segmentamos por número de fila para preservar el mapping fila ↔ XML
+    # y dejar cada ejemplo como bloque buscable con `rg`.
+    if not _TABLE_BLOCK_GUARD_RE.match(content):
+        return None
+    if "<" not in content:
+        return None
+
+    matches = [
+        m
+        for m in _ROW_MARKER_RE.finditer(content)
+        if not _is_inside_xml_tag(content, m.start())
+    ]
+    if len(matches) < 2:
+        return None
+
+    out: list[str] = []
+    for i, m in enumerate(matches):
+        nums = m.group(1).strip()
+        body_start = m.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        body = content[body_start:body_end].strip()
+
+        xml_at = body.find("<")
+        if xml_at == -1:
+            description, xml = body, ""
+        else:
+            description = body[:xml_at].strip()
+            xml = body[xml_at:].strip()
+
+        is_group = " " in nums
+        label = (
+            f"Filas {', '.join(nums.split())}" if is_group else f"Fila {nums}"
+        )
+        heading_desc = description[:80].rstrip(" ,.;:")
+        if len(description) > 80:
+            heading_desc += "…"
+
+        out.append(f"### {label} — {heading_desc}")
+        out.append("")
+        if description:
+            out.append(description)
+            out.append("")
+        if xml:
+            out.append("```xml")
+            out.append(xml)
+            out.append("```")
+            out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def denormalize_flattened_tables(md: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        restructured = restructure_xml_table_block(match.group(2))
+        return restructured if restructured is not None else match.group(0)
+
+    return _FENCED_BLOCK_RE.sub(replace, md)
+
+
+def _looks_like_xml(content: str) -> bool:
+    stripped = content.lstrip()
+    if not stripped.startswith("<"):
+        return False
+    return "</" in stripped or "/>" in stripped
+
+
+def _regex_pretty_print_xml(xml: str, indent: str = "  ") -> str:
+    # Fallback usado cuando lxml no logra recuperar nada del fragmento.
+    text = re.sub(r"\s+", " ", xml).strip()
+    text = re.sub(r">\s*<", ">\n<", text)
+
+    out: list[str] = []
+    depth = 0
+    same_line_pair_re = re.compile(r"^<[^/!?][^>]*>[^<]*</[^>]+>\s*$")
+
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+
+        if line.startswith("</"):
+            depth = max(0, depth - 1)
+            out.append(indent * depth + line)
+        elif (
+            line.startswith("<?")
+            or line.startswith("<!")
+            or line.endswith("/>")
+            or same_line_pair_re.match(line)
+        ):
+            out.append(indent * depth + line)
+        elif line.startswith("<"):
+            out.append(indent * depth + line)
+            depth += 1
+        else:
+            out.append(indent * depth + line)
+
+    return "\n".join(out)
+
+
+def pretty_print_xml(content: str, indent: str = "  ") -> str:
+    # Los ejemplos XML emitidos por docling suelen venir aplastados en una
+    # sola línea. Los parseamos con lxml en modo recovering — los fragmentos
+    # no siempre tienen un único root, así que envolvemos en un wrapper
+    # sintético y dedent-amos el resultado. Si lxml no recupera nada
+    # (típicamente por artefactos de OCR muy rotos) caemos al fallback regex
+    # que es tolerante por construcción.
+    text = content.strip()
+    if not text:
+        return content
+
+    decl_match = _XML_DECL_RE.match(text)
+    decl = decl_match.group(0).strip() if decl_match else ""
+    body = text[decl_match.end():] if decl_match else text
+
+    wrapped = f"<__docling_wrap__>{body}</__docling_wrap__>"
+    parser = etree.XMLParser(recover=True, remove_blank_text=True)
+
+    try:
+        root = etree.fromstring(wrapped.encode("utf-8"), parser)
+    except etree.XMLSyntaxError:
+        return _regex_pretty_print_xml(content, indent)
+
+    if root is None or (len(root) == 0 and not (root.text or "").strip()):
+        return _regex_pretty_print_xml(content, indent)
+
+    etree.indent(root, space=indent)
+    full = etree.tostring(root, encoding="unicode", pretty_print=True)
+
+    lines = full.split("\n")
+    if len(lines) < 2:
+        return _regex_pretty_print_xml(content, indent)
+
+    inner = lines[1:-1] if lines[-1].strip() == "" else lines[1:]
+    if inner and inner[-1].strip().startswith("</__docling_wrap__"):
+        inner = inner[:-1]
+    inner = [l[len(indent):] if l.startswith(indent) else l for l in inner]
+
+    parts: list[str] = []
+    if decl:
+        parts.append(decl)
+    parts.extend(inner)
+    return "\n".join(parts).rstrip()
+
+
+def format_xml_blocks(md: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        lang = match.group(1).strip()
+        content = match.group(2)
+        if not _looks_like_xml(content):
+            return match.group(0)
+        formatted = pretty_print_xml(content)
+        out_lang = lang or "xml"
+        return f"```{out_lang}\n{formatted}\n```"
+
+    return _FENCED_BLOCK_RE.sub(replace, md)
+
+
 def write_chunk_pdf(
     reader: PdfReader, start_page: int, end_page: int, chunk_path: Path
 ) -> None:
@@ -113,7 +287,10 @@ def convert_chunk_with_retries(
     for attempt in range(1, max_retries + 2):
         try:
             result = converter.convert(str(chunk_path))
-            return result.document.export_to_markdown() + "\n\n"
+            md = result.document.export_to_markdown()
+            md = denormalize_flattened_tables(md)
+            md = format_xml_blocks(md)
+            return md + "\n\n"
         except Exception as e:
             last_error = e
             if attempt <= max_retries:
@@ -169,7 +346,10 @@ def convert_pdf_to_markdown(source_path: Path, output_path: Path) -> None:
 def convert_document_to_markdown(source_path: Path, output_path: Path) -> None:
     converter = DocumentConverter()
     result = converter.convert(str(source_path))
-    output_path.write_text(result.document.export_to_markdown() + "\n", encoding="utf-8")
+    md = result.document.export_to_markdown()
+    md = denormalize_flattened_tables(md)
+    md = format_xml_blocks(md)
+    output_path.write_text(md + "\n", encoding="utf-8")
 
 
 def main() -> None:
