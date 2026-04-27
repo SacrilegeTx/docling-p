@@ -1,47 +1,46 @@
 # Docling Markdown converter
 
-This project provides a small Python command-line script that converts PDF and
-office documents to Markdown by using [Docling](https://github.com/docling-project/docling).
-It is designed for local document conversion, with extra care for large PDFs
-that contain long tables.
+This project converts PDF and office documents to Markdown using
+[Docling](https://github.com/docling-project/docling). It ships with two ways
+to run conversions:
 
-The script accepts an input document path, converts it to Markdown, and writes a
-`.md` file either next to the original document or in a custom path passed with
-`--output`.
+- A **command-line interface** for scripting and power users.
+- A **local web UI** with drag-and-drop, live progress, and an advanced-options
+  panel for less technical users.
+
+Both interfaces share the same conversion core, so behavior and tuning options
+match across the two.
 
 ## What it does
 
-`main.py` converts documents supported by Docling into Markdown. The script has
-two conversion paths:
+The shared core converts documents supported by Docling into Markdown using
+two paths:
 
-- **PDF files** use a safer page-by-page flow. The script splits the PDF into
-  temporary one-page chunks, converts each chunk, retries failed chunks, writes
-  progress incrementally, and then copies the final Markdown file to the output
-  path.
-- **Non-PDF files** use Docling's direct conversion flow. This is the right
-  path for formats such as Word, Excel, PowerPoint, and HTML files because they
-  don't use the same page-based structure as PDFs.
+- **PDF files** use a safer page-by-page flow. The PDF is split into temporary
+  chunks (one page each by default), each chunk is converted, failed chunks
+  are retried, progress is written incrementally, and the final Markdown is
+  copied to the output path.
+- **Non-PDF files** use Docling's direct conversion flow — the right path for
+  formats such as Word, Excel, PowerPoint, and HTML files because they don't
+  use the same page-based structure as PDFs.
 
-The PDF path keeps OCR disabled and table extraction enabled in `FAST` mode.
-That configuration was chosen for born-digital PDFs where text and tables are
-already embedded in the document. It reduces memory pressure and avoids the OCR
-pipeline when OCR doesn't add value.
+The default PDF configuration keeps OCR disabled and runs table extraction in
+`FAST` mode. That choice prioritizes stability for born-digital PDFs with
+extensive tables. Both behaviors are configurable per-conversion (see
+[Conversion options](#conversion-options)).
 
-After Docling produces Markdown, the script runs a post-processing pipeline
-that restructures tables of the form "row number | description | XML example"
-that Docling collapsed into a single-line code block, and pretty-prints any
-XML found in fenced code blocks. See [Post-processing pipeline](#post-processing-pipeline).
+After Docling produces Markdown, a post-processing pipeline restructures
+flattened "row + description + XML" tables and pretty-prints fenced XML
+blocks. See [Post-processing pipeline](#post-processing-pipeline).
 
 ## Supported input files
-
-Docling supports several document formats. In practical terms, this script is
-intended for files such as:
 
 - `.pdf`
 - `.docx`
 - `.xlsx`
 - `.pptx`
-- `.html`
+- `.html`, `.htm`
+- `.md`
 - other formats supported by the installed Docling version
 
 PDF files receive special handling because large tables can make full-document
@@ -49,24 +48,24 @@ conversion expensive. Other formats are sent directly to Docling.
 
 ## Requirements
 
-You need the following tools and configuration:
-
 - Python compatible with the version declared in `pyproject.toml`.
 - [`uv`](https://docs.astral.sh/uv/) for dependency management.
 - A Hugging Face token stored in `.env` as `HF_TOKEN`.
-- Windows, Linux, or WSL. This project was originally used from Windows paths,
-  so the examples include Windows-friendly commands.
+- Windows, Linux, or WSL.
 
-The project dependencies are declared in `pyproject.toml`:
+Project dependencies (declared in `pyproject.toml`):
 
-- `docling`
-- `lxml`
-- `pypdf`
-- `python-dotenv`
+- `docling` — document conversion engine
+- `pypdf[crypto]` — PDF chunking; the `crypto` extra adds `cryptography` so
+  encrypted PDFs (AES) can be opened
+- `lxml` — XML pretty-printing in the post-processing pipeline
+- `python-dotenv` — loads `HF_TOKEN` from `.env`
+- `fastapi`, `uvicorn[standard]`, `python-multipart`, `sse-starlette` — power
+  the local web UI
 
 ## Installation
 
-Clone the repository and install the dependencies with `uv`:
+Clone the repository and install dependencies with `uv`:
 
 ```powershell
 git clone <your-repository-url>
@@ -76,40 +75,22 @@ uv sync
 ```
 
 The `uv venv` command creates a local `.venv` folder before dependencies are
-installed. The command above asks Python for the path of the currently active
-interpreter and tells `uv` to create the virtual environment from that Python
-installation.
+installed. The command above asks Python for the path of the active interpreter
+and tells `uv` to create the virtual environment from that Python installation.
 
-If you prefer to pass the Python version directly in PowerShell, you can use a
-version selector instead:
+If you prefer to pass the Python version directly in PowerShell:
 
 ```powershell
 uv venv --python 3.14 .venv
 uv sync
 ```
 
-Using the interpreter path is more explicit and avoids depending on the exact
-text returned by `python --version`.
-
 ### Clean installation in Ubuntu or WSL
 
 If you use Ubuntu or WSL, the cleanest setup is to keep the project inside the
 Linux filesystem instead of working directly from `/mnt/c`. Python virtual
-environments contain many small files and executable links, and they are more
-reliable when they live in the same filesystem as the Python interpreter.
-
-Recommended layout:
-
-```bash
-mkdir -p ~/projects
-cp -a /mnt/c/Data/Projects/Python/docling-p ~/projects/docling-p
-cd ~/projects/docling-p
-rm -rf .venv
-uv venv --python "$(python3 -c 'import sys; print(sys.executable)')" .venv
-uv sync
-```
-
-If you prefer to clone the repository directly into WSL, use:
+environments are more reliable when they live in the same filesystem as the
+Python interpreter.
 
 ```bash
 mkdir -p ~/projects
@@ -121,7 +102,7 @@ uv sync
 ```
 
 You can still convert files stored in Windows by passing their `/mnt/c/...`
-path to the script:
+path:
 
 ```bash
 uv run python main.py "/mnt/c/Users/your-user/Downloads/Documents/input.pdf"
@@ -129,41 +110,23 @@ uv run python main.py "/mnt/c/Users/your-user/Downloads/Documents/input.pdf"
 
 ### Installing while the project stays in `/mnt/c`
 
-Keeping the project in `/mnt/c` also works, but dependency installation can be
-slower because WSL is writing a Linux virtual environment into a Windows-mounted
-filesystem. In that case, use `UV_LINK_MODE=copy` to tell `uv` to copy files
-instead of trying to create hardlinks across filesystems:
+Keeping the project in `/mnt/c` works, but installation is slower because WSL
+writes a Linux virtual environment into a Windows-mounted filesystem. Use
+`UV_LINK_MODE=copy` so `uv` copies files instead of trying to hardlink them
+across filesystems:
 
 ```bash
 uv venv --python "$(python3 -c 'import sys; print(sys.executable)')" .venv
 UV_LINK_MODE=copy uv sync
 ```
 
-This setting avoids warnings like:
-
-```text
-Failed to hardlink files; falling back to full copy.
-```
-
-That warning is not fatal. It means `uv` couldn't hardlink files from its cache
-to the target environment and copied them instead. The installation can still
-finish successfully.
-
-If you are already inside the project folder and `.venv` doesn't exist yet,
-create it before syncing dependencies:
-
-```powershell
-uv venv --python (python -c "import sys; print(sys.executable)") .venv
-uv sync
-```
-
-If `.venv` already exists and was created by the same operating system you are
-using now, running only `uv sync` is enough.
+The `Failed to hardlink files; falling back to full copy` warning is not fatal
+— installation still finishes successfully.
 
 ## Environment setup
 
-The script loads environment variables from `.env` by using `python-dotenv`.
-Create your local `.env` file from the example file:
+The project loads environment variables from `.env` using `python-dotenv`.
+Create your local `.env` file from the example:
 
 ```powershell
 copy .env.example .env
@@ -175,182 +138,197 @@ Then edit `.env` and set your Hugging Face token:
 HF_TOKEN=your_huggingface_token_here
 ```
 
-Do not commit your real `.env` file. Keep secrets local.
+Do not commit your real `.env`. Keep secrets local.
 
-## Usage
+## Quick start (web UI)
 
-Run the script with the document you want to convert.
+The fastest path for non-technical users:
 
-### Save next to the input file
+- **Windows**: double-click `start.bat`.
+- **Linux / macOS / WSL**: run `./start.sh` from a terminal.
 
-When you don't pass `--output`, the script creates a Markdown file next to the
-input document with the same base name.
+The launcher starts a local server on `http://localhost:8000` and opens your
+default browser. Drag a document onto the drop zone, watch the progress, and
+the converted `.md` downloads automatically when conversion finishes.
+
+The server is local-only (`127.0.0.1`) — no files leave your machine.
+
+To stop the server, close the launcher window or press `Ctrl+C` in the
+terminal.
+
+## Web UI usage
+
+The web UI provides:
+
+- **Drag-and-drop upload** with a click-to-browse fallback.
+- **Live page counter** (`X / Y pages`) showing the current page being
+  processed alongside the progress bar.
+- **Streaming progress log** with each event the converter emits (chunk start,
+  retries, warnings).
+- **FIFO queue**: if you start a second conversion while another is running,
+  it waits its turn. The UI shows an "Esperando en cola, posición N" banner
+  until the worker picks it up.
+- **Automatic download** of the resulting `.md` when conversion finishes —
+  files are not persisted on the server.
+- **Advanced options panel** (collapsed by default) to tune the same
+  parameters available on the CLI.
+
+### Concurrency
+
+The server processes one conversion at a time on purpose. Docling loads ML
+models that consume significant RAM, so running two conversions in parallel
+risks out-of-memory failures. Additional uploads are queued and reported back
+to the user with their position.
+
+### Running on a different port
+
+Edit `webapp.py` and change the `HOST` / `PORT` constants near the bottom of
+the file. The browser auto-launch and CORS-free local-only behavior assume
+`127.0.0.1`.
+
+## CLI usage
+
+Run the script with the document you want to convert:
 
 ```powershell
-uv run python main.py "C:\Users\your-user\Downloads\Documents\pdf-to-convert.pdf"
+uv run python main.py "C:\Users\your-user\Downloads\Documents\input.pdf"
 ```
 
-If the input file is:
+When `--output` is not passed, the script creates a Markdown file next to the
+input document with the same base name. So:
 
 ```text
-C:\Users\your-user\Downloads\Documents\pdf-to-convert.pdf
+C:\Users\your-user\Downloads\Documents\input.pdf
 ```
 
-The output file becomes:
+becomes:
 
 ```text
-C:\Users\your-user\Downloads\Documents\pdf-to-convert.md
+C:\Users\your-user\Downloads\Documents\input.md
 ```
 
 ### Save to a custom output path
 
-Use `--output` or `-o` to choose where to save the Markdown file.
-
 ```powershell
-uv run python main.py "C:\Users\your-user\Downloads\Documents\input.pdf" --output "C:\Users\your-user\Downloads\Markdown\input.md"
+uv run python main.py "C:\path\to\input.pdf" --output "C:\path\to\out\input.md"
 ```
 
-The short flag works the same way:
+The short flag `-o` works the same way. The script creates the output folder
+when it does not exist.
 
-```powershell
-uv run python main.py "C:\Users\your-user\Downloads\Documents\input.docx" -o "C:\Users\your-user\Downloads\Markdown\input.md"
-```
+### CLI parameters
 
-The script creates the output folder when it doesn't exist.
+| Parameter         | Default | Description |
+| ----------------- | ------- | ----------- |
+| `input`           | —       | Path to the document to convert (required). Quote it when it contains spaces. |
+| `--output`, `-o`  | input path with `.md` extension | Path to the Markdown file to create. |
+| `--chunk-size`    | `1`     | Pages per chunk when processing PDFs. Higher = less overhead, more RAM. |
+| `--max-retries`   | `2`     | Retries per chunk on transient errors. |
+| `--ocr`           | off     | Enable OCR. Costly; only useful for scanned PDFs without embedded text. |
+| `--table-mode`    | `fast`  | Table detection mode (`fast` or `accurate`). |
+| `--threads`       | `1`     | Threads for the CPU accelerator. |
 
-## Parameters
-
-The script exposes a small command-line interface.
-
-| Parameter | Required | Description |
-| --- | --- | --- |
-| `input` | Yes | Path to the document to convert. Use quotes when the path contains spaces. |
-| `--output`, `-o` | No | Path to the Markdown file to create. Defaults to the input path with `.md` extension. |
-
-You can also view the command help:
+View command help anytime:
 
 ```powershell
 uv run python main.py --help
 ```
 
-## How the script works
+### CLI examples
+
+Convert a scanned PDF with OCR and accurate tables:
+
+```bash
+uv run python main.py "scanned.pdf" --ocr --table-mode accurate
+```
+
+Speed up a small, well-behaved PDF:
+
+```bash
+uv run python main.py "small.pdf" --chunk-size 5 --threads 4
+```
+
+## Conversion options
+
+The same options are exposed in both the CLI (flags) and the web UI (advanced
+options panel):
+
+- `chunk_size` (default `1`): pages per chunk for the PDF flow. Higher values
+  reduce per-chunk overhead but require more RAM and increase the cost of a
+  single failure (the whole chunk needs retrying).
+- `max_retries` (default `2`): how many times a failed chunk is retried
+  before the conversion aborts.
+- `do_ocr` (default off): enable OCR for scanned PDFs. Disabled by default
+  because RapidOCR uses substantial memory and adds no value when the PDF
+  already contains embedded text.
+- `table_mode` (default `fast`): TableFormer mode. `fast` is the
+  stability-first choice for large born-digital PDFs with many tables.
+  `accurate` reconstructs complex tables better at the cost of speed and
+  memory.
+- `num_threads` (default `1`): threads for the CPU accelerator. Higher means
+  faster conversion but higher peak memory.
+
+### When to change these defaults
+
+The defaults are best for born-digital PDFs with large tables. Change them
+only when you understand the trade-offs:
+
+- Increase `chunk_size` when your PDFs are small, reliable, and you want
+  faster conversion.
+- Keep `chunk_size = 1` when PDFs are large, table-heavy, or prone to memory
+  errors.
+- Switch `table_mode` to `accurate` only when table quality matters more than
+  runtime and memory.
+- Enable `do_ocr` only for scanned PDFs where text is not embedded in the
+  document.
+
+If the document is already text-based, OCR and heavier table analysis can add
+cost without improving the Markdown enough to justify the risk.
+
+## How it works
 
 The conversion starts by loading `.env`, validating `HF_TOKEN`, and resolving
-the input and output paths. It then checks that the input exists and is a file.
+the input and output paths. Then the input is checked for existence.
 
-For PDF files, the script uses this flow:
+For PDF files:
 
 1. Create a temporary `tmp` folder.
 2. Open the PDF with `pypdf`.
-3. Split the document into one-page chunks.
-4. Convert each chunk with Docling.
-5. Retry each chunk up to two times when conversion fails.
+3. Split the document into `chunk_size`-page chunks.
+4. Convert each chunk with Docling, applying the configured options.
+5. Retry each chunk up to `max_retries` times when conversion fails.
 6. Run the post-processing pipeline on each converted chunk's Markdown.
 7. Append each converted chunk to a temporary `.partial.md` file.
 8. Copy the completed partial file to the final output path.
 9. Remove the temporary folder.
 
-For non-PDF files, the script uses this flow:
+For non-PDF files:
 
 1. Send the document directly to `DocumentConverter`.
 2. Export the converted document to Markdown.
-3. Run the post-processing pipeline on the resulting Markdown.
+3. Run the post-processing pipeline.
 4. Write the Markdown to the output path.
 
-This split keeps the PDF workflow resilient while keeping other document types
-simple.
-
-## PDF conversion settings
-
-The PDF converter is intentionally conservative:
-
-- OCR is disabled with `do_ocr = False`.
-- Table structure extraction is enabled with `do_table_structure = True`.
-- TableFormer runs in `TableFormerMode.FAST` mode.
-- Conversion uses CPU with one thread.
-- PDF chunks use one page per chunk.
-- Failed chunks are retried two times.
-
-These defaults prioritize stability for large born-digital PDFs with extensive
-tables. If you need to process scanned PDFs, you may need to enable OCR and
-accept the higher memory cost.
-
-### Why `TableFormerMode.FAST` is used
-
-Docling can analyze table structure with different TableFormer modes. This
-script uses `TableFormerMode.FAST` because the original target document had
-large, complex tables but also contained real embedded text. In that scenario,
-the goal is to preserve table structure without spending extra time and memory
-on the most expensive table analysis path.
-
-`FAST` is a stability-first choice:
-
-- It reduces processing cost compared with heavier table-structure modes.
-- It is usually enough for born-digital PDFs where text and table boundaries are
-  already reasonably extractable.
-- It lowers the chance of memory pressure when a PDF contains many long tables.
-
-The trade-off is that complex tables may not be reconstructed perfectly. Nested
-headers, merged cells, multi-page tables, and visually dense layouts can still
-need manual cleanup in the generated Markdown.
-
-### Why `CHUNK_SIZE = 1` is used
-
-The script converts PDFs one page at a time. That setting is intentionally slow
-but safer for large PDFs.
-
-Using one-page chunks gives the script a smaller working set:
-
-- Each Docling conversion handles only one page.
-- A failed page can be retried without restarting the entire document.
-- Successfully converted pages are appended to a partial Markdown file as the
-  script progresses.
-- Temporary chunk PDFs are deleted immediately after each page finishes.
-
-This matters because the original PDF had extensive tables and previously hit a
-`std::bad_alloc` memory failure during preprocessing when OCR was involved.
-Keeping `CHUNK_SIZE = 1`, disabling OCR, using `TableFormerMode.FAST`, and
-limiting the converter to one CPU thread all push the script toward predictable
-memory usage.
-
-The trade-off is speed. A higher chunk size may be faster, but it increases the
-amount of document content Docling must hold and analyze at once. If you raise
-`CHUNK_SIZE`, test with representative PDFs before using it for long documents.
-
-### When to change these settings
-
-The defaults are best for born-digital PDFs with large tables. Change them only
-when you understand the trade-off:
-
-- Increase `CHUNK_SIZE` when your PDFs are small, reliable, and you want faster
-  conversion.
-- Keep `CHUNK_SIZE = 1` when PDFs are large, table-heavy, or prone to memory
-  errors.
-- Keep `TableFormerMode.FAST` when you prefer speed and stability.
-- Try a more accurate table mode only when table quality matters more than
-  runtime and memory use.
-- Enable OCR only for scanned PDFs where text is not embedded in the document.
-
-In other words: don't tune these values blindly. If the document is already
-text-based, OCR and heavier table analysis can add cost without improving the
-Markdown enough to justify the risk.
+This split keeps the PDF workflow resilient while keeping other document
+types simple.
 
 ## Post-processing pipeline
 
-After Docling exports Markdown, the script applies two transformations before
-writing the file. Both transformations are idempotent and conservative: a block
-that does not match the expected pattern passes through unchanged.
+After Docling exports Markdown, two transformations run before the file is
+written. Both are idempotent and conservative — a block that does not match
+the expected pattern passes through unchanged.
 
 ### Phase 1: Restructure flattened "row + description + XML" tables
 
-Some documents contain tables shaped as `row number | description | XML example`
-where each cell is wide (often because the XML cell holds many lines). When the
-layout detector cannot identify the region as a table, Docling emits the rows
-as a single fenced code block with everything concatenated into one line.
+Some documents contain tables shaped as `row number | description | XML
+example` where each cell is wide (often because the XML cell holds many
+lines). When the layout detector cannot identify the region as a table,
+Docling emits the rows as a single fenced code block with everything
+concatenated into one line.
 
-The script detects that pattern and re-segments each block into individual rows.
-For every detected row (or row group, when the original table used rowspan) it
-emits:
+The pipeline detects that pattern and re-segments each block into individual
+rows. For every detected row (or row group, when the original table used
+rowspan) it emits:
 
 - A `### Fila N` (or `### Filas N1, N2, ...`) heading.
 - The row description as plain text.
@@ -371,10 +349,9 @@ pretty-printer that does not validate the structure.
 
 ### When the pipeline does nothing
 
-Both transformations only act on fenced code blocks that match their detection
-heuristics. Plain Markdown tables, prose, and code blocks for non-XML content
-are left untouched. If your document does not contain XML examples or
-flattened table-like blocks, the post-processing step is a no-op.
+Both transformations only act on fenced code blocks that match their
+detection heuristics. Plain Markdown tables, prose, and code blocks for
+non-XML content are left untouched.
 
 ## Windows notes
 
@@ -384,14 +361,12 @@ Use quotes around Windows paths because document names often contain spaces:
 uv run python main.py "C:\Users\your-user\Downloads\Documents\my-file.pdf"
 ```
 
-If you run the project through WSL against a Windows-mounted folder, be careful
-with virtual environments created by Windows tools. A Windows `.venv\Scripts`
-folder can behave differently from a Linux `.venv/bin` folder. When in doubt,
-use the same environment where you installed the dependencies.
+If you run the project through WSL against a Windows-mounted folder, be
+careful with virtual environments created by Windows tools. A Windows
+`.venv\Scripts` folder behaves differently from a Linux `.venv/bin` folder.
+When in doubt, use the same environment where you installed the dependencies.
 
 ## Troubleshooting
-
-Use these checks when something fails.
 
 ### `Falta la variable de entorno requerida: HF_TOKEN`
 
@@ -401,37 +376,43 @@ Create `.env` and set `HF_TOKEN`:
 HF_TOKEN=your_huggingface_token_here
 ```
 
+### `cryptography>=3.1 is required for AES algorithm`
+
+Your PDF is encrypted. The `pypdf[crypto]` extra in `pyproject.toml` brings
+in the required `cryptography` package. If you upgraded from an older version
+of this project, run `uv sync` to install the missing dependency.
+
 ### `No existe el archivo de entrada`
 
-Check the path and wrap it in quotes when it contains spaces:
-
-```powershell
-uv run python main.py "C:\full\path\to\document.pdf"
-```
+Check the path and wrap it in quotes when it contains spaces.
 
 ### The conversion uses too much memory
 
-For born-digital PDFs, keep OCR disabled. The current script already does this.
-For scanned PDFs, OCR may be required, but it can increase memory usage
-significantly.
+Keep OCR disabled for born-digital PDFs (the default). For scanned PDFs OCR
+is required, but it can increase memory usage significantly. Reducing
+`chunk_size` to `1` and `num_threads` to `1` also lowers peak memory.
 
 ### Tables don't look perfect in Markdown
 
 Markdown has limited table layout support. Tables with very wide cells,
 nested headers, or merged cells may still need manual cleanup. The
 post-processing pipeline already handles the worst case — tables that
-Docling collapsed into a single-line code block with embedded XML examples
-— so check those first before assuming a table is irrecoverable.
+Docling collapsed into a single-line code block with embedded XML examples.
+You can also try `--table-mode accurate` for better detection at the cost of
+speed.
+
+### Browser does not open automatically
+
+The web UI tries to open your default browser when launching. If it fails
+(common in headless environments or WSL without `wslview`), open
+[http://localhost:8000](http://localhost:8000) manually.
 
 ### `uv run` fails in WSL with a Windows `.venv`
 
 Use the same platform that created the environment, or recreate the virtual
-environment from the platform you are using. For example, if the project was set
-up in Windows PowerShell, run it from Windows PowerShell.
-
-If you want to switch the project to WSL, close any Windows Python processes
-that are using the old `.venv`, delete the virtual environment, and recreate it
-from WSL:
+environment from the platform you are using. To switch the project to WSL,
+close any Windows Python processes that are using the old `.venv`, delete
+the virtual environment, and recreate it from WSL:
 
 ```bash
 rm -rf .venv
@@ -439,43 +420,36 @@ uv venv --python "$(python3 -c 'import sys; print(sys.executable)')" .venv
 UV_LINK_MODE=copy uv sync
 ```
 
-If Windows blocks `.venv\Scripts\python.exe`, a Python process is still running
-from the old Windows virtual environment. Stop that process first, then delete
-`.venv` again.
-
 ## Limitations
 
-The script focuses on reliable Markdown extraction, not pixel-perfect document
-reconstruction. Keep these limitations in mind:
+This project focuses on reliable Markdown extraction, not pixel-perfect
+document reconstruction:
 
 - Complex PDF layouts may still require manual Markdown cleanup, even after
   the post-processing pipeline.
-- Scanned PDFs are not handled by the default PDF settings because OCR is
-  disabled.
-- Non-PDF files are converted directly and don't have chunk-level retry logic.
+- Scanned PDFs need `--ocr` (CLI) or the OCR toggle (web UI) enabled.
+- Non-PDF files are converted directly and don't have chunk-level retry
+  logic.
 - Very large documents can still take time to process.
-
-## Possible improvements
-
-Future versions could add:
-
-- A `--ocr` flag for scanned PDFs.
-- A `--chunk-size` option for advanced PDF tuning.
-- A `--retries` option for adjusting retry behavior.
-- A `--keep-temp` flag for debugging failed chunks.
-- Format-specific options for spreadsheets and presentations.
+- The web UI processes one job at a time on purpose — see
+  [Concurrency](#concurrency).
 
 ## Project structure
 
-The repository is intentionally small:
-
 ```text
 .
-├── main.py          # Command-line converter
-├── pyproject.toml   # Project metadata and dependencies
-├── uv.lock          # Locked dependency versions
-├── .env.example     # Example environment file
-└── README.md        # Project documentation
+├── core.py            # Pure conversion logic + ConversionOptions + ProgressEvent
+├── main.py            # CLI wrapper
+├── webapp.py          # FastAPI web UI backend (upload, SSE progress, download)
+├── static/
+│   ├── index.html     # Web UI markup
+│   └── app.js         # Drag-and-drop, SSE handling, options form
+├── start.bat          # Windows double-click launcher
+├── start.sh           # Unix shell launcher
+├── pyproject.toml     # Project metadata and dependencies
+├── uv.lock            # Locked dependency versions
+├── .env.example       # Example environment file
+└── README.md          # Project documentation
 ```
 
 ## License

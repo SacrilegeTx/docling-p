@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Docling — PDF a Markdown</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .gradient-bg {
+      background: radial-gradient(circle at 20% 0%, #eef2ff 0%, transparent 50%),
+                  radial-gradient(circle at 80% 100%, #fce7f3 0%, transparent 50%),
+                  #f8fafc;
+    }
+    .dropzone-active {
+      border-color: #6366f1 !important;
+      background-color: #eef2ff !important;
+      transform: scale(1.01);
+    }
+    .progress-bar { transition: width 0.3s ease-out; }
+    .log-line { animation: slideIn 0.2s ease-out; }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-4px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    summary::-webkit-details-marker { display: none; }
+    details[open] .chevron { transform: rotate(90deg); }
+  </style>
+</head>
+<body class="gradient-bg min-h-screen">
+  <main class="max-w-3xl mx-auto px-6 py-12">
+    <header class="text-center mb-10">
+      <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg mb-4">
+        <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+      </div>
+      <h1 class="text-3xl font-bold text-slate-900">Docling Markdown Converter</h1>
+      <p class="text-slate-500 mt-2">Arrastrá un documento y descargalo como Markdown.</p>
+    </header>
+
+    <section id="card" class="bg-white rounded-2xl shadow-xl p-8 border border-slate-200/60">
+      <!-- IDLE STATE -->
+      <div id="state-idle">
+        <div
+          id="dropzone"
+          class="border-2 border-dashed border-slate-300 rounded-xl p-12 text-center cursor-pointer hover:border-indigo-400 hover:bg-slate-50 transition-all"
+        >
+          <svg class="w-16 h-16 mx-auto text-slate-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+          </svg>
+          <p class="text-lg font-semibold text-slate-700">Arrastrá tu archivo acá</p>
+          <p class="text-sm text-slate-500 mt-1">o hacé click para elegirlo</p>
+          <p class="text-xs text-slate-400 mt-4">PDF, DOCX, XLSX, PPTX, HTML</p>
+          <input type="file" id="file-input" class="hidden" accept=".pdf,.docx,.xlsx,.pptx,.html,.htm,.md" />
+        </div>
+
+        <!-- Advanced options -->
+        <details class="mt-6">
+          <summary class="cursor-pointer text-sm font-medium text-slate-600 hover:text-slate-900 select-none flex items-center gap-2 py-2">
+            <svg class="chevron w-4 h-4 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+            Opciones avanzadas
+            <span class="text-xs text-slate-400 font-normal ml-auto">solo PDF</span>
+          </summary>
+          <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4 p-5 bg-slate-50 rounded-lg border border-slate-100">
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-semibold text-slate-700">Páginas por bloque</span>
+              <input id="opt-chunk-size" type="number" min="1" value="1"
+                class="px-3 py-2 border border-slate-300 rounded-md text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none" />
+              <span class="text-xs text-slate-500">Más alto = menos overhead, más RAM</span>
+            </label>
+
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-semibold text-slate-700">Reintentos por bloque</span>
+              <input id="opt-max-retries" type="number" min="0" value="2"
+                class="px-3 py-2 border border-slate-300 rounded-md text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none" />
+              <span class="text-xs text-slate-500">Reintentos ante errores transitorios</span>
+            </label>
+
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-semibold text-slate-700">Modo de tablas</span>
+              <select id="opt-table-mode"
+                class="px-3 py-2 border border-slate-300 rounded-md text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none bg-white">
+                <option value="fast">Rápido</option>
+                <option value="accurate">Preciso</option>
+              </select>
+              <span class="text-xs text-slate-500">Preciso es más lento pero detecta mejor</span>
+            </label>
+
+            <label class="flex flex-col gap-1.5">
+              <span class="text-xs font-semibold text-slate-700">Threads CPU</span>
+              <input id="opt-num-threads" type="number" min="1" value="1"
+                class="px-3 py-2 border border-slate-300 rounded-md text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none" />
+              <span class="text-xs text-slate-500">Más threads = más rápido y más RAM</span>
+            </label>
+
+            <label class="sm:col-span-2 flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-md">
+              <input id="opt-do-ocr" type="checkbox" class="mt-0.5 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+              <div>
+                <span class="text-xs font-semibold text-slate-700">Habilitar OCR</span>
+                <p class="text-xs text-slate-600 mt-0.5">Solo necesario para PDFs escaneados (sin texto). Costoso en RAM.</p>
+              </div>
+            </label>
+          </div>
+        </details>
+      </div>
+
+      <!-- WORKING STATE -->
+      <div id="state-working" class="hidden">
+        <div class="flex items-center justify-between mb-3">
+          <p id="working-filename" class="font-semibold text-slate-700 truncate"></p>
+          <p id="working-status" class="text-sm text-slate-500">Subiendo...</p>
+        </div>
+
+        <!-- Queued banner -->
+        <div id="queued-banner" class="hidden my-6 p-6 bg-amber-50 border border-amber-200 rounded-xl text-center">
+          <svg class="animate-spin h-8 w-8 text-amber-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p class="text-base font-semibold text-amber-900">Esperando en cola</p>
+          <p class="text-sm text-amber-700 mt-1">Hay <span id="queued-position" class="font-semibold tabular-nums">-</span> trabajo(s) por delante</p>
+        </div>
+
+        <!-- Page counter (prominent) -->
+        <div id="page-counter" class="hidden my-6 text-center">
+          <div class="inline-flex items-baseline gap-3">
+            <span id="page-current" class="text-5xl font-extrabold text-slate-900 tabular-nums">0</span>
+            <span class="text-3xl text-slate-300 font-light">/</span>
+            <span id="page-total" class="text-3xl font-semibold text-slate-400 tabular-nums">0</span>
+          </div>
+          <p class="text-xs uppercase tracking-wider text-slate-500 mt-2 font-medium">páginas</p>
+        </div>
+
+        <!-- Progress bar -->
+        <div id="progress-wrap">
+          <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+            <div id="progress-fill" class="progress-bar bg-gradient-to-r from-indigo-500 to-purple-600 h-full" style="width: 0%"></div>
+          </div>
+          <p id="progress-detail" class="text-xs text-slate-500 mt-2">Esperando inicio...</p>
+        </div>
+
+        <!-- Log -->
+        <div class="mt-6 bg-slate-900 rounded-lg p-4 max-h-48 overflow-y-auto">
+          <div id="log" class="mono text-xs text-slate-300 space-y-1"></div>
+        </div>
+      </div>
+
+      <!-- DONE STATE -->
+      <div id="state-done" class="hidden text-center py-6">
+        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 mb-4">
+          <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+        <h2 class="text-xl font-semibold text-slate-900">¡Listo!</h2>
+        <p class="text-slate-500 mt-1">Tu Markdown se descargó automáticamente.</p>
+        <button id="btn-reset" class="mt-6 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg transition-colors">
+          Convertir otro
+        </button>
+      </div>
+
+      <!-- ERROR STATE -->
+      <div id="state-error" class="hidden text-center py-6">
+        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-100 mb-4">
+          <svg class="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.85-2.74L13.85 4.26a2 2 0 00-3.7 0L3.15 16.26A2 2 0 005 19z" />
+          </svg>
+        </div>
+        <h2 class="text-xl font-semibold text-slate-900">Algo salió mal</h2>
+        <p id="error-message" class="text-slate-500 mt-2 mono text-sm break-all"></p>
+        <button id="btn-retry" class="mt-6 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg transition-colors">
+          Intentar de nuevo
+        </button>
+      </div>
+    </section>
+
+    <footer class="text-center mt-8 text-xs text-slate-400">
+      Local-only · Tus archivos no salen de tu máquina
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
