@@ -1,6 +1,8 @@
 import asyncio
 import json
+import platform
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -13,15 +15,21 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 
 from core import (
     DEFAULT_OPTIONS,
+    SUPPORTED_EXTENSIONS,
     ConversionOptions,
     ProgressEvent,
     convert_to_markdown,
+    default_batch_output_root,
     ensure_environment,
+    is_wsl_windows_mount,
+    normalize_extensions,
+    plan_batch,
 )
 
 
@@ -34,9 +42,10 @@ VALID_OPTION_KEYS = {"chunk_size", "max_retries", "do_ocr", "table_mode", "num_t
 class Job:
     id: str
     filename: str
-    staging_dir: Path
     input_path: Path
     output_path: Path
+    staging_dir: Path | None = None
+    batch_id: str | None = None
     options: ConversionOptions = field(default_factory=lambda: DEFAULT_OPTIONS)
     queue: "queue.Queue[ProgressEvent | None]" = field(default_factory=queue.Queue)
     status: str = "queued"
@@ -44,7 +53,25 @@ class Job:
     error: str | None = None
 
 
+@dataclass
+class BatchSession:
+    id: str
+    root: Path
+    output_root: Path
+    options: ConversionOptions
+    force: bool
+    total: int
+    job_ids: list[str]
+    files: list[dict] = field(default_factory=list)
+    skipped: int = 0
+    converted: int = 0
+    failed: int = 0
+    queue: "queue.Queue[dict | None]" = field(default_factory=queue.Queue)
+    finished: bool = False
+
+
 jobs: dict[str, Job] = {}
+batches: dict[str, BatchSession] = {}
 jobs_lock = threading.Lock()
 job_queue: "queue.Queue[str | None]" = queue.Queue()
 
@@ -70,6 +97,37 @@ def _parse_options(raw: str) -> ConversionOptions:
         raise HTTPException(status_code=400, detail=f"Opciones inválidas: {e}")
 
 
+def _emit_batch(batch: BatchSession, payload: dict) -> None:
+    batch.queue.put(payload)
+
+
+def _update_file_status(batch: BatchSession, job_id: str, status: str, error: str | None = None) -> None:
+    for entry in batch.files:
+        if entry.get("job_id") == job_id:
+            entry["status"] = status
+            if error is not None:
+                entry["error"] = error
+            return
+
+
+def _finalize_batch_if_done(batch: BatchSession) -> None:
+    done = batch.converted + batch.failed + batch.skipped
+    if done >= batch.total and not batch.finished:
+        batch.finished = True
+        _emit_batch(batch, {
+            "kind": "batch_done",
+            "message": (
+                f"Listo: {batch.converted} convertidos, "
+                f"{batch.skipped} saltados, {batch.failed} errores"
+            ),
+            "total": batch.total,
+            "converted": batch.converted,
+            "skipped": batch.skipped,
+            "failed": batch.failed,
+        })
+        batch.queue.put(None)
+
+
 def _worker_loop() -> None:
     while True:
         job_id = job_queue.get()
@@ -81,7 +139,11 @@ def _worker_loop() -> None:
 
         with jobs_lock:
             for other in jobs.values():
-                if other.status == "queued" and other.id != job_id:
+                if (
+                    other.status == "queued"
+                    and other.id != job_id
+                    and other.batch_id is None
+                ):
                     other.position = max(0, other.position - 1)
                     if other.position > 0:
                         other.queue.put(ProgressEvent(
@@ -92,20 +154,84 @@ def _worker_loop() -> None:
             job.status = "running"
             job.position = 0
 
+        batch = batches.get(job.batch_id) if job.batch_id else None
+
+        if batch is not None:
+            _update_file_status(batch, job.id, "running")
+            _emit_batch(batch, {
+                "kind": "file_start",
+                "job_id": job.id,
+                "filename": job.filename,
+                "source": str(job.input_path),
+                "output": str(job.output_path),
+                "message": f"Procesando {job.filename}",
+            })
+
         try:
-            convert_to_markdown(
-                job.input_path,
-                job.output_path,
-                on_progress=lambda e, _q=job.queue: _q.put(e),
-                options=job.options,
-            )
+            if batch is not None:
+                def _proxy(ev: ProgressEvent, _b=batch, _j=job) -> None:
+                    _emit_batch(_b, {
+                        "kind": "file_progress",
+                        "job_id": _j.id,
+                        "filename": _j.filename,
+                        "inner_kind": ev.kind,
+                        "message": ev.message,
+                        "current": ev.current,
+                        "total": ev.total,
+                    })
+
+                convert_to_markdown(
+                    job.input_path,
+                    job.output_path,
+                    on_progress=_proxy,
+                    options=job.options,
+                )
+            else:
+                convert_to_markdown(
+                    job.input_path,
+                    job.output_path,
+                    on_progress=lambda e, _q=job.queue: _q.put(e),
+                    options=job.options,
+                )
             job.status = "done"
+
+            if batch is not None:
+                batch.converted += 1
+                _update_file_status(batch, job.id, "done")
+                _emit_batch(batch, {
+                    "kind": "file_done",
+                    "job_id": job.id,
+                    "filename": job.filename,
+                    "output": str(job.output_path),
+                    "converted": batch.converted,
+                    "skipped": batch.skipped,
+                    "failed": batch.failed,
+                    "total": batch.total,
+                })
         except Exception as e:
             job.status = "error"
             job.error = str(e)
-            job.queue.put(ProgressEvent(kind="error", message=str(e)))
+
+            if batch is not None:
+                batch.failed += 1
+                _update_file_status(batch, job.id, "error", error=str(e))
+                _emit_batch(batch, {
+                    "kind": "file_error",
+                    "job_id": job.id,
+                    "filename": job.filename,
+                    "error": str(e),
+                    "converted": batch.converted,
+                    "skipped": batch.skipped,
+                    "failed": batch.failed,
+                    "total": batch.total,
+                })
+            else:
+                job.queue.put(ProgressEvent(kind="error", message=str(e)))
         finally:
-            job.queue.put(None)
+            if batch is not None:
+                _finalize_batch_if_done(batch)
+            else:
+                job.queue.put(None)
 
 
 @asynccontextmanager
@@ -149,7 +275,7 @@ async def convert(
         shutil.copyfileobj(file.file, f)
 
     with jobs_lock:
-        ahead = sum(1 for j in jobs.values() if j.status in ("queued", "running"))
+        ahead = sum(1 for j in jobs.values() if j.status in ("queued", "running") and j.batch_id is None)
         job = Job(
             id=job_id,
             filename=filename,
@@ -208,6 +334,8 @@ async def download(job_id: str) -> FileResponse:
         )
     if not job.output_path.exists():
         raise HTTPException(status_code=404, detail="Archivo de salida no encontrado")
+    if job.staging_dir is None:
+        raise HTTPException(status_code=400, detail="Este job no soporta descarga (batch)")
 
     def cleanup() -> None:
         shutil.rmtree(job.staging_dir, ignore_errors=True)
@@ -220,6 +348,193 @@ async def download(job_id: str) -> FileResponse:
         filename=Path(job.filename).stem + ".md",
         background=BackgroundTask(cleanup),
     )
+
+
+class BatchRequest(BaseModel):
+    root_path: str
+    options: dict = {}
+    force: bool = False
+    extensions: list[str] | None = None
+
+
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+@app.post("/convert-batch")
+async def convert_batch(req: BatchRequest) -> dict:
+    raw_path = req.root_path.strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="root_path es obligatorio")
+
+    # Guard: path estilo Windows (C:\..., D:/...) en server no-Windows.
+    if platform.system() != "Windows" and _WINDOWS_DRIVE_PATH.match(raw_path):
+        drive = raw_path[0].lower()
+        rest = raw_path[3:].replace("\\", "/")
+        suggested = f"/mnt/{drive}/{rest}"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Path estilo Windows ({raw_path!r}) en server {platform.system()}. "
+                f"Si estás en WSL, usá la ruta montada: '{suggested}'."
+            ),
+        )
+
+    try:
+        opts = ConversionOptions(**req.options) if req.options else DEFAULT_OPTIONS
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Opciones inválidas: {e}")
+
+    root = Path(raw_path).expanduser()
+    try:
+        root = root.resolve(strict=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No existe la ruta: {root}")
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"No es un directorio: {root}")
+
+    try:
+        extensions = normalize_extensions(req.extensions)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    output_root = default_batch_output_root(root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        plan = plan_batch(root, output_root, extensions, force=req.force)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    batch_id = uuid.uuid4().hex
+    batch = BatchSession(
+        id=batch_id,
+        root=root,
+        output_root=output_root,
+        options=opts,
+        force=req.force,
+        total=len(plan),
+        job_ids=[],
+    )
+
+    queued_jobs: list[str] = []
+
+    for item in plan:
+        rel_source = str(item.source.relative_to(root))
+        rel_output = str(item.output.relative_to(output_root))
+
+        if item.action == "skip_existing":
+            batch.skipped += 1
+            batch.files.append({
+                "job_id": None,
+                "source": rel_source,
+                "output": rel_output,
+                "status": "skipped",
+                "note": item.note,
+            })
+            continue
+
+        if item.action == "skip_duplicate":
+            batch.skipped += 1
+            batch.files.append({
+                "job_id": None,
+                "source": rel_source,
+                "output": rel_output,
+                "status": "skipped_duplicate",
+                "note": item.note,
+            })
+            continue
+
+        item.output.parent.mkdir(parents=True, exist_ok=True)
+
+        job_id = uuid.uuid4().hex
+        job = Job(
+            id=job_id,
+            filename=item.source.name,
+            input_path=item.source,
+            output_path=item.output,
+            staging_dir=None,
+            batch_id=batch_id,
+            options=opts,
+        )
+
+        with jobs_lock:
+            jobs[job_id] = job
+
+        batch.job_ids.append(job_id)
+        queued_jobs.append(job_id)
+        batch.files.append({
+            "job_id": job_id,
+            "source": rel_source,
+            "output": rel_output,
+            "status": "queued",
+            "note": item.note,
+        })
+
+    batches[batch_id] = batch
+
+    if batch.total == 0 or len(queued_jobs) == 0:
+        _emit_batch(batch, {
+            "kind": "batch_done",
+            "message": (
+                f"Sin archivos para procesar (total {batch.total}, "
+                f"saltados {batch.skipped})."
+            ),
+            "total": batch.total,
+            "converted": 0,
+            "skipped": batch.skipped,
+            "failed": 0,
+        })
+        batch.queue.put(None)
+        batch.finished = True
+    else:
+        for jid in queued_jobs:
+            job_queue.put(jid)
+
+    return {
+        "batch_id": batch_id,
+        "root": str(root),
+        "output_root": str(output_root),
+        "total": batch.total,
+        "queued": len(queued_jobs),
+        "skipped": batch.skipped,
+        "warning_mnt": is_wsl_windows_mount(root),
+        "extensions": sorted(extensions),
+        "files": batch.files,
+    }
+
+
+@app.get("/batch-progress/{batch_id}")
+async def batch_progress(batch_id: str) -> EventSourceResponse:
+    batch = batches.get(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Batch no encontrado")
+
+    async def stream():
+        while True:
+            event = await asyncio.to_thread(batch.queue.get)
+            if event is None:
+                return
+            yield {"event": event.get("kind", "message"), "data": json.dumps(event)}
+
+    return EventSourceResponse(stream())
+
+
+@app.get("/batch-status/{batch_id}")
+async def batch_status(batch_id: str) -> dict:
+    batch = batches.get(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Batch no encontrado")
+    return {
+        "batch_id": batch.id,
+        "root": str(batch.root),
+        "output_root": str(batch.output_root),
+        "total": batch.total,
+        "converted": batch.converted,
+        "skipped": batch.skipped,
+        "failed": batch.failed,
+        "finished": batch.finished,
+        "files": batch.files,
+    }
 
 
 if STATIC_DIR.exists():

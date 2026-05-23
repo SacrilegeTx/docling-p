@@ -1,6 +1,8 @@
+import hashlib
 import os
 import re
 import shutil
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -399,6 +401,34 @@ def convert_document_to_markdown(source_path: Path, output_path: Path) -> None:
     output_path.write_text(md + "\n", encoding="utf-8")
 
 
+def convert_xlsx_to_markdown(source_path: Path, output_path: Path) -> None:
+    # Docling pierde columnas sin header y formulas en XLSX. Pandas con
+    # data_only=True lee los valores cacheados que Excel guarda al
+    # guardar el archivo, y preserva el ancho real de la tabla.
+    import pandas as pd
+
+    sheets = pd.read_excel(source_path, sheet_name=None, header=0)
+
+    parts: list[str] = []
+    parts.append(f"# {source_path.stem}\n")
+
+    if not sheets:
+        parts.append("_(archivo sin hojas legibles)_\n")
+    else:
+        multi_sheet = len(sheets) > 1
+        for sheet_name, df in sheets.items():
+            df = df.dropna(how="all").dropna(axis=1, how="all")
+            if multi_sheet:
+                parts.append(f"## Hoja: {sheet_name}\n")
+            if df.empty:
+                parts.append("_(hoja vacía)_\n")
+                continue
+            parts.append(df.to_markdown(index=False))
+            parts.append("")
+
+    output_path.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+
+
 def convert_to_markdown(
     source_path: Path,
     output_path: Path,
@@ -407,9 +437,16 @@ def convert_to_markdown(
 ) -> None:
     progress = on_progress or _noop_progress
     opts = options or DEFAULT_OPTIONS
+    ext = source_path.suffix.lower()
 
-    if source_path.suffix.lower() == ".pdf":
+    if ext == ".pdf":
         convert_pdf_to_markdown(source_path, output_path, opts, progress)
+    elif ext in (".xlsx", ".xlsm"):
+        progress(ProgressEvent(
+            kind="info",
+            message=f"Convirtiendo {source_path.name} (pandas)...",
+        ))
+        convert_xlsx_to_markdown(source_path, output_path)
     else:
         progress(ProgressEvent(
             kind="info",
@@ -421,3 +458,314 @@ def convert_to_markdown(
         kind="done",
         message=f"Conversión completada: {output_path}",
     ))
+
+
+@dataclass
+class BatchEvent:
+    kind: str
+    message: str
+    file: Path | None = None
+    output: Path | None = None
+    current: int = 0
+    total: int = 0
+    error: str | None = None
+
+
+BatchCallback = Callable[[BatchEvent], None]
+
+
+def _noop_batch(_: BatchEvent) -> None:
+    pass
+
+
+def is_wsl_windows_mount(path: Path) -> bool:
+    return str(path.expanduser().resolve()).startswith("/mnt/")
+
+
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx", ".html", ".htm", ".md",
+})
+
+
+def normalize_extensions(exts: list[str] | set[str] | None) -> set[str]:
+    if not exts:
+        return {".pdf"}
+    out: set[str] = set()
+    for raw in exts:
+        e = raw.strip().lower()
+        if not e:
+            continue
+        if e == "all":
+            return set(SUPPORTED_EXTENSIONS)
+        if not e.startswith("."):
+            e = f".{e}"
+        if e not in SUPPORTED_EXTENSIONS:
+            raise ValueError(
+                f"Extensión no soportada: {e}. "
+                f"Soportadas: {sorted(SUPPORTED_EXTENSIONS)}"
+            )
+        out.add(e)
+    return out or {".pdf"}
+
+
+def discover_files(root: Path, extensions: set[str] | None = None) -> list[Path]:
+    root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"La ruta no es un directorio: {root}")
+
+    exts = extensions if extensions else {".pdf"}
+    matched: list[Path] = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() in exts:
+            matched.append(p)
+    return sorted(matched)
+
+
+# Alias retrocompatible
+def discover_pdfs(root: Path) -> list[Path]:
+    return discover_files(root, {".pdf"})
+
+
+def resolve_batch_output(pdf: Path, output_root: Path) -> Path:
+    # Bucket: si el archivo cuelga de "attachments" (export Atlassian),
+    # usamos el abuelo (issue/page folder). Sino el padre inmediato.
+    # Match case-insensitive para tolerar Attachments / ATTACHMENTS.
+    parent = pdf.parent
+    bucket = parent.parent.name if parent.name.lower() == "attachments" else parent.name
+    if not bucket:
+        bucket = "_root"
+    # Conservar la extensión original en el output así "X.pdf" y "X.xlsx"
+    # no colisionan en "X.md". Resultado: "X.pdf.md", "X.xlsx.md", ...
+    return output_root / bucket / f"{pdf.name}.md"
+
+
+def default_batch_output_root(root: Path) -> Path:
+    return root.expanduser().resolve() / "markdowns"
+
+
+@dataclass(frozen=True)
+class PlanItem:
+    source: Path
+    output: Path
+    action: str  # "convert" | "skip_existing" | "skip_duplicate"
+    note: str = ""
+
+
+def _file_sha256(path: Path, chunk_size: int = 1 << 16) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _collision_suffix(source: Path, root: Path) -> str:
+    # Path origen relativo al root, sin el filename, joined con "_".
+    # Da contexto único: "S-Z_TPMS" vs "EXTRA_TPMS".
+    try:
+        rel = source.relative_to(root)
+    except ValueError:
+        rel = source
+    parts = list(rel.parts[:-1])
+    return "_".join(parts) if parts else "root"
+
+
+def _rename_with_suffix(output: Path, source: Path, root: Path) -> Path:
+    suffix = _collision_suffix(source, root)
+    new_name = f"{source.stem}__{suffix}{source.suffix}.md"
+    return output.parent / new_name
+
+
+def plan_batch(
+    root: Path,
+    output_root: Path,
+    extensions: set[str] | None = None,
+    *,
+    force: bool = False,
+) -> list[PlanItem]:
+    root = root.expanduser().resolve()
+    output_root = output_root.expanduser().resolve()
+    exts = extensions if extensions else {".pdf"}
+
+    files = discover_files(root, exts)
+
+    # 1) Resolver output inicial para cada archivo
+    initial: list[tuple[Path, Path]] = [
+        (f, resolve_batch_output(f, output_root)) for f in files
+    ]
+
+    # 2) Agrupar por output path inicial para detectar colisiones
+    groups: dict[Path, list[Path]] = defaultdict(list)
+    for src, out in initial:
+        groups[out].append(src)
+
+    plan: list[PlanItem] = []
+
+    for out_path, sources in groups.items():
+        if len(sources) == 1:
+            src = sources[0]
+            if out_path.exists() and not force:
+                plan.append(PlanItem(src, out_path, "skip_existing", "ya existe"))
+            else:
+                plan.append(PlanItem(src, out_path, "convert"))
+            continue
+
+        # Múltiples archivos compiten por el mismo output → colisión real
+        sizes = {s.stat().st_size for s in sources}
+        identical = False
+        if len(sizes) == 1:
+            # Mismo size: confirmar por hash si son los mismos bytes
+            hashes = {_file_sha256(s) for s in sources}
+            identical = len(hashes) == 1
+
+        if identical:
+            # Conservamos el primero (sorted ya en discover_files), saltamos resto.
+            kept, others = sources[0], sources[1:]
+            if out_path.exists() and not force:
+                plan.append(PlanItem(kept, out_path, "skip_existing", "ya existe"))
+            else:
+                plan.append(PlanItem(kept, out_path, "convert"))
+            for other in others:
+                try:
+                    note = f"duplicado idéntico de {kept.relative_to(root)}"
+                except ValueError:
+                    note = f"duplicado idéntico de {kept}"
+                plan.append(PlanItem(other, out_path, "skip_duplicate", note))
+            continue
+
+        # Colisión real con contenido distinto → renombrar todos con sufijo de path
+        for src in sources:
+            new_out = _rename_with_suffix(out_path, src, root)
+            if new_out.exists() and not force:
+                plan.append(PlanItem(src, new_out, "skip_existing", "ya existe (renombrado)"))
+            else:
+                plan.append(PlanItem(
+                    src, new_out, "convert",
+                    f"renombrado por colisión con otros archivos del mismo bucket",
+                ))
+
+    # Orden estable para output determinístico
+    plan.sort(key=lambda it: (str(it.output), str(it.source)))
+    return plan
+
+
+def convert_directory(
+    root: Path,
+    output_root: Path | None = None,
+    options: ConversionOptions | None = None,
+    on_event: BatchCallback | None = None,
+    on_file_progress: Callable[[Path, ProgressEvent], None] | None = None,
+    extensions: set[str] | None = None,
+    *,
+    force: bool = False,
+) -> dict:
+    emit = on_event or _noop_batch
+    opts = options or DEFAULT_OPTIONS
+
+    root = root.expanduser().resolve()
+    out_root = (output_root or default_batch_output_root(root)).expanduser().resolve()
+
+    exts = extensions if extensions else {".pdf"}
+    plan = plan_batch(root, out_root, exts, force=force)
+    total = len(plan)
+
+    exts_label = ", ".join(sorted(exts))
+    emit(BatchEvent(
+        kind="discovered",
+        message=f"Encontrados {total} archivos ({exts_label}) en {root}",
+        total=total,
+    ))
+
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    converted, skipped, skipped_duplicate, errors = 0, 0, 0, []
+
+    for idx, item in enumerate(plan, start=1):
+        try:
+            rel_out = item.output.relative_to(out_root)
+        except ValueError:
+            rel_out = item.output
+
+        if item.action == "skip_existing":
+            skipped += 1
+            emit(BatchEvent(
+                kind="file_skip",
+                message=f"[{idx}/{total}] Saltado (ya existe): {rel_out}",
+                file=item.source,
+                output=item.output,
+                current=idx,
+                total=total,
+            ))
+            continue
+
+        if item.action == "skip_duplicate":
+            skipped_duplicate += 1
+            emit(BatchEvent(
+                kind="file_skip_duplicate",
+                message=f"[{idx}/{total}] Duplicado: {item.source.name} ({item.note})",
+                file=item.source,
+                output=item.output,
+                current=idx,
+                total=total,
+            ))
+            continue
+
+        item.output.parent.mkdir(parents=True, exist_ok=True)
+
+        emit(BatchEvent(
+            kind="file_start",
+            message=f"[{idx}/{total}] {item.source.name} → {rel_out}",
+            file=item.source,
+            output=item.output,
+            current=idx,
+            total=total,
+        ))
+
+        try:
+            file_progress = (
+                (lambda ev, _src=item.source: on_file_progress(_src, ev))
+                if on_file_progress else None
+            )
+            convert_to_markdown(item.source, item.output, on_progress=file_progress, options=opts)
+            converted += 1
+            emit(BatchEvent(
+                kind="file_done",
+                message=f"[{idx}/{total}] {item.source.name} ✓",
+                file=item.source,
+                output=item.output,
+                current=idx,
+                total=total,
+            ))
+        except Exception as e:
+            errors.append({"file": str(item.source), "error": str(e)})
+            emit(BatchEvent(
+                kind="file_error",
+                message=f"[{idx}/{total}] {item.source.name} ✗ {e}",
+                file=item.source,
+                output=item.output,
+                current=idx,
+                total=total,
+                error=str(e),
+            ))
+
+    emit(BatchEvent(
+        kind="batch_done",
+        message=(
+            f"Listo: {converted} convertidos, {skipped} saltados, "
+            f"{skipped_duplicate} duplicados, {len(errors)} errores"
+        ),
+        current=total,
+        total=total,
+    ))
+
+    return {
+        "root": str(root),
+        "output_root": str(out_root),
+        "total": total,
+        "converted": converted,
+        "skipped": skipped,
+        "skipped_duplicate": skipped_duplicate,
+        "errors": errors,
+    }
