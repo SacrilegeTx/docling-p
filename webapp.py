@@ -38,6 +38,15 @@ STATIC_DIR = Path(__file__).parent / "static"
 VALID_OPTION_KEYS = {"chunk_size", "max_retries", "do_ocr", "table_mode", "num_threads"}
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """Serve assets with `no-cache` so UI updates load without a hard refresh."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 @dataclass
 class Job:
     id: str
@@ -247,8 +256,11 @@ app = FastAPI(lifespan=lifespan, title="Docling Markdown Converter")
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+async def index() -> HTMLResponse:
+    return HTMLResponse(
+        content=(STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.post("/convert")
@@ -538,7 +550,7 @@ async def batch_status(batch_id: str) -> dict:
 
 
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
 
 def _open_browser_when_ready(url: str) -> None:
