@@ -410,6 +410,12 @@ The web UI tries to open your default browser when launching. If it fails
 (common in headless environments or WSL without `wslview`), open
 [http://localhost:8000](http://localhost:8000) manually.
 
+### The web UI still behaves like an older version
+
+The server sends `Cache-Control: no-cache`, so a normal reload picks up UI
+updates. A browser tab opened before upgrading may still hold the old script;
+do one hard refresh (Ctrl+Shift+R or Ctrl+F5) to clear it.
+
 ### `uv run` fails in WSL with a Windows `.venv`
 
 Use the same platform that created the environment, or recreate the virtual
