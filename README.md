@@ -200,7 +200,9 @@ uv run python main.py "C:\Users\your-user\Downloads\Documents\input.pdf"
 ```
 
 When `--output` is not passed, the script creates a Markdown file next to the
-input document with the same base name. So:
+input document, named after the full source file name plus `.md`. The source
+extension is kept so `X.pdf` and `X.xlsx` never overwrite each other's output.
+So:
 
 ```text
 C:\Users\your-user\Downloads\Documents\input.pdf
@@ -209,7 +211,7 @@ C:\Users\your-user\Downloads\Documents\input.pdf
 becomes:
 
 ```text
-C:\Users\your-user\Downloads\Documents\input.md
+C:\Users\your-user\Downloads\Documents\input.pdf.md
 ```
 
 ### Save to a custom output path
@@ -226,7 +228,7 @@ when it does not exist.
 | Parameter         | Default | Description |
 | ----------------- | ------- | ----------- |
 | `input`           | —       | Path to the document to convert (required). Quote it when it contains spaces. |
-| `--output`, `-o`  | input path with `.md` extension | Path to the Markdown file to create. |
+| `--output`, `-o`  | input file name plus `.md` (`input.pdf` → `input.pdf.md`) | Path to the Markdown file to create. |
 | `--chunk-size`    | `1`     | Pages per chunk when processing PDFs. Higher = less overhead, more RAM. |
 | `--max-retries`   | `2`     | Retries per chunk on transient errors. |
 | `--ocr`           | off     | Enable OCR. Costly; only useful for scanned PDFs without embedded text. |
@@ -461,6 +463,7 @@ uv run pytest
 ├── core.py            # Pure conversion logic + ConversionOptions + ProgressEvent
 ├── main.py            # CLI wrapper
 ├── webapp.py          # FastAPI web UI backend (upload, SSE progress, download)
+├── output_paths.py    # Shared `<name>.<ext>.md` output naming and CLI path resolution (kept free of docling imports)
 ├── static_files.py    # Static file handler that forces revalidation (`no-cache`)
 ├── xlsx_markdown.py   # XLSX to Markdown conversion with pandas (kept free of docling imports)
 ├── static/
