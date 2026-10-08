@@ -148,8 +148,8 @@ The fastest path for non-technical users:
 - **Linux / macOS / WSL**: run `./start.sh` from a terminal.
 
 The launcher starts a local server on `http://localhost:8000` and opens your
-default browser. Drag a document onto the drop zone, watch the progress, and
-the converted `.md` downloads automatically when conversion finishes.
+default browser. Drag one or more documents onto the drop zone, watch the progress, and
+each converted `.md` downloads automatically when its conversion finishes.
 
 The server is local-only (`127.0.0.1`) — no files leave your machine.
 
@@ -160,7 +160,10 @@ terminal.
 
 The web UI provides:
 
-- **Drag-and-drop upload** with a click-to-browse fallback.
+- **Drag-and-drop upload** with a click-to-browse fallback. Drop or pick
+  several files at once and they are converted one after another, each `.md`
+  downloading as it finishes. Your browser may ask once for permission to
+  download multiple files.
 - **Live page counter** (`X / Y pages`) showing the current page being
   processed alongside the progress bar.
 - **Streaming progress log** with each event the converter emits (chunk start,

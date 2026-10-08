@@ -18,6 +18,9 @@ const progressFill = document.getElementById("progress-fill");
 const progressDetail = document.getElementById("progress-detail");
 const log = document.getElementById("log");
 const errorMessage = document.getElementById("error-message");
+const workingBatch = document.getElementById("working-batch");
+const doneMessage = document.getElementById("done-message");
+const DONE_MESSAGE_DEFAULT = "Tu Markdown se descargó automáticamente.";
 
 document.getElementById("btn-reset").addEventListener("click", () => showState("idle"));
 document.getElementById("btn-retry").addEventListener("click", () => showState("idle"));
@@ -70,8 +73,10 @@ function readOptions() {
 
 dropzone.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  if (file) handleFile(file);
+  const files = Array.from(e.target.files);
+  // Reset so picking the same files again still fires "change".
+  fileInput.value = "";
+  handleFiles(files);
 });
 
 ["dragenter", "dragover"].forEach((evt) => {
@@ -89,15 +94,67 @@ fileInput.addEventListener("change", (e) => {
   });
 });
 dropzone.addEventListener("drop", (e) => {
-  const file = e.dataTransfer.files[0];
-  if (file) handleFile(file);
+  handleFiles(Array.from(e.dataTransfer.files));
 });
 
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
 
-async function handleFile(file) {
+async function handleFiles(fileList) {
+  const files = Array.from(fileList);
+  if (files.length === 0) return;
+  const total = files.length;
+
   showState("working");
+  workingBatch.textContent = `Archivo 1 de ${total}`;
+  workingBatch.classList.toggle("hidden", total === 1);
+
+  const failed = [];
+  let lastError = "";
+  for (let i = 0; i < total; i++) {
+    const file = files[i];
+    resetFileProgress();
+    workingBatch.textContent = `Archivo ${i + 1} de ${total}`;
+    if (total > 1) appendLog(`> [${i + 1}/${total}] ${file.name}`);
+
+    const result = await handleFile(file);
+    if (!result.ok) {
+      lastError = result.error;
+      failed.push(file.name);
+      appendLog(`> ✗ ${file.name}: ${result.error}`);
+    }
+  }
+
+  if (total === 1) {
+    if (failed.length) {
+      showError(lastError);
+    } else {
+      doneMessage.textContent = DONE_MESSAGE_DEFAULT;
+      showState("done");
+    }
+    return;
+  }
+
+  const okCount = total - failed.length;
+  if (okCount === 0) {
+    showError(`No se pudo convertir ninguno de los ${total} archivos`);
+    return;
+  }
+  let message = `${okCount} de ${total} archivos convertidos. Los Markdown se descargaron automáticamente.`;
+  if (failed.length) message += ` Fallaron: ${failed.join(", ")}.`;
+  doneMessage.textContent = message;
+  showState("done");
+}
+
+function resetFileProgress() {
+  progressFill.style.width = "0%";
+  pageCurrent.textContent = "0";
+  pageTotal.textContent = "0";
+  progressDetail.textContent = "Esperando inicio...";
+  setWorkingMode("uploading");
+}
+
+async function handleFile(file) {
   workingFilename.textContent = file.name;
   workingStatus.textContent = "Subiendo...";
   setWorkingMode("uploading");
@@ -121,8 +178,7 @@ async function handleFile(file) {
     downloadName = file.name.replace(/\.[^.]+$/, "") + ".md";
     appendLog(`> Job ${jobId.slice(0, 8)} encolado (posición ${position})`);
   } catch (err) {
-    showError(err.message);
-    return;
+    return { ok: false, error: err.message };
   }
 
   if (position > 0) {
@@ -134,98 +190,106 @@ async function handleFile(file) {
     setWorkingMode("converting");
   }
 
-  streamProgress(jobId, downloadName);
+  return streamProgress(jobId, downloadName);
 }
 
 function streamProgress(jobId, downloadName) {
-  const evt = new EventSource(`/progress/${jobId}`);
-  let finished = false;
+  return new Promise((resolve) => {
+    const evt = new EventSource(`/progress/${jobId}`);
+    let finished = false;
+    let settled = false;
 
-  const updateCounter = (current, total) => {
-    if (typeof current === "number" && typeof total === "number" && total > 0) {
-      pageCurrent.textContent = current;
-      pageTotal.textContent = total;
-      const pct = Math.round((current / total) * 100);
-      progressFill.style.width = `${pct}%`;
-      progressDetail.textContent = `${pct}% completado`;
-    }
-  };
-
-  const handleQueued = (e) => {
-    const data = JSON.parse(e.data);
-    appendLog(`> ${data.message}`);
-    queuedPosition.textContent = data.current ?? "-";
-    setWorkingMode("queued");
-    workingStatus.textContent = "En cola";
-  };
-
-  const handleInfo = (e) => {
-    const data = JSON.parse(e.data);
-    appendLog(`> ${data.message}`);
-    workingStatus.textContent = "Convirtiendo...";
-    setWorkingMode("converting");
-    if (typeof data.total === "number" && data.total > 0) {
-      pageTotal.textContent = data.total;
-      pageCurrent.textContent = data.current ?? 0;
-    }
-  };
-
-  const handlePageStart = (e) => {
-    const data = JSON.parse(e.data);
-    appendLog(`> ${data.message}`);
-    setWorkingMode("converting");
-    if (typeof data.current === "number" && typeof data.total === "number") {
-      // current = paginas completadas; mostramos la "en proceso" como current+1
-      pageCurrent.textContent = Math.min(data.current + 1, data.total);
-      pageTotal.textContent = data.total;
-      progressDetail.textContent = `Procesando página ${data.current + 1} de ${data.total}`;
-    }
-  };
-
-  const handlePageDone = (e) => {
-    const data = JSON.parse(e.data);
-    updateCounter(data.current, data.total);
-  };
-
-  const handleRetryWarning = (e) => {
-    const data = JSON.parse(e.data);
-    appendLog(`> ⚠ ${data.message}`);
-  };
-
-  const handleError = (e) => {
-    const data = JSON.parse(e.data);
-    finished = true;
-    evt.close();
-    showError(data.message);
-  };
-
-  evt.addEventListener("queued", handleQueued);
-  evt.addEventListener("info", handleInfo);
-  evt.addEventListener("page_start", handlePageStart);
-  evt.addEventListener("page_done", handlePageDone);
-  evt.addEventListener("retry", handleRetryWarning);
-  evt.addEventListener("warning", handleRetryWarning);
-  evt.addEventListener("error", handleError);
-
-  evt.addEventListener("done", (e) => {
-    finished = true;
-    progressFill.style.width = "100%";
-    pageCurrent.textContent = pageTotal.textContent;
-    progressDetail.textContent = "Conversión completada";
-    appendLog("> ✓ Conversión completada");
-    setTimeout(() => {
+    // Close the stream and settle the promise exactly once.
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
       evt.close();
-      triggerDownload(`/download/${jobId}`, downloadName);
-      showState("done");
-    }, 600);
+      resolve(result);
+    };
+
+    const updateCounter = (current, total) => {
+      if (typeof current === "number" && typeof total === "number" && total > 0) {
+        pageCurrent.textContent = current;
+        pageTotal.textContent = total;
+        const pct = Math.round((current / total) * 100);
+        progressFill.style.width = `${pct}%`;
+        progressDetail.textContent = `${pct}% completado`;
+      }
+    };
+
+    const handleQueued = (e) => {
+      const data = JSON.parse(e.data);
+      appendLog(`> ${data.message}`);
+      queuedPosition.textContent = data.current ?? "-";
+      setWorkingMode("queued");
+      workingStatus.textContent = "En cola";
+    };
+
+    const handleInfo = (e) => {
+      const data = JSON.parse(e.data);
+      appendLog(`> ${data.message}`);
+      workingStatus.textContent = "Convirtiendo...";
+      setWorkingMode("converting");
+      if (typeof data.total === "number" && data.total > 0) {
+        pageTotal.textContent = data.total;
+        pageCurrent.textContent = data.current ?? 0;
+      }
+    };
+
+    const handlePageStart = (e) => {
+      const data = JSON.parse(e.data);
+      appendLog(`> ${data.message}`);
+      setWorkingMode("converting");
+      if (typeof data.current === "number" && typeof data.total === "number") {
+        // current = paginas completadas; mostramos la "en proceso" como current+1
+        pageCurrent.textContent = Math.min(data.current + 1, data.total);
+        pageTotal.textContent = data.total;
+        progressDetail.textContent = `Procesando página ${data.current + 1} de ${data.total}`;
+      }
+    };
+
+    const handlePageDone = (e) => {
+      const data = JSON.parse(e.data);
+      updateCounter(data.current, data.total);
+    };
+
+    const handleRetryWarning = (e) => {
+      const data = JSON.parse(e.data);
+      appendLog(`> ⚠ ${data.message}`);
+    };
+
+    const handleError = (e) => {
+      const data = JSON.parse(e.data);
+      finished = true;
+      settle({ ok: false, error: data.message });
+    };
+
+    evt.addEventListener("queued", handleQueued);
+    evt.addEventListener("info", handleInfo);
+    evt.addEventListener("page_start", handlePageStart);
+    evt.addEventListener("page_done", handlePageDone);
+    evt.addEventListener("retry", handleRetryWarning);
+    evt.addEventListener("warning", handleRetryWarning);
+    evt.addEventListener("error", handleError);
+
+    evt.addEventListener("done", (e) => {
+      finished = true;
+      progressFill.style.width = "100%";
+      pageCurrent.textContent = pageTotal.textContent;
+      progressDetail.textContent = "Conversión completada";
+      appendLog("> ✓ Conversión completada");
+      setTimeout(() => {
+        triggerDownload(`/download/${jobId}`, downloadName);
+        settle({ ok: true });
+      }, 600);
+    });
+
+    evt.onerror = () => {
+      if (!finished) {
+        settle({ ok: false, error: "La conexión con el servidor se interrumpió" });
+      }
+    };
   });
-
-  evt.onerror = () => {
-    if (!finished) {
-      evt.close();
-      showError("La conexión con el servidor se interrumpió");
-    }
-  };
 }
 
 function showError(message) {
