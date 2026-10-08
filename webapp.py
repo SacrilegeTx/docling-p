@@ -14,7 +14,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
@@ -31,20 +30,12 @@ from core import (
     normalize_extensions,
     plan_batch,
 )
+from static_files import NoCacheStaticFiles
 
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm", ".md"}
 STATIC_DIR = Path(__file__).parent / "static"
 VALID_OPTION_KEYS = {"chunk_size", "max_retries", "do_ocr", "table_mode", "num_threads"}
-
-
-class NoCacheStaticFiles(StaticFiles):
-    """Serve assets with `no-cache` so UI updates load without a hard refresh."""
-
-    def file_response(self, *args, **kwargs):
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
 
 
 @dataclass
