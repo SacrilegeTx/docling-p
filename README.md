@@ -59,6 +59,8 @@ Project dependencies (declared in `pyproject.toml`):
 - `pypdf[crypto]` — PDF chunking; the `crypto` extra adds `cryptography` so
   encrypted PDFs (AES) can be opened
 - `lxml` — XML pretty-printing in the post-processing pipeline
+- `pandas`, `openpyxl`, `tabulate` — XLSX/XLSM conversion (read sheets with
+  cached formula values and render them as Markdown tables)
 - `python-dotenv` — loads `HF_TOKEN` from `.env`
 - `fastapi`, `uvicorn[standard]`, `python-multipart`, `sse-starlette` — power
   the local web UI
