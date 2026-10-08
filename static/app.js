@@ -293,6 +293,8 @@ function streamProgress(jobId, downloadName) {
     };
 
     const handleError = (e) => {
+      // Native connection errors arrive here too, without data; onerror handles them.
+      if (!e.data) return;
       const data = JSON.parse(e.data);
       finished = true;
       settle({ ok: false, error: data.message });
