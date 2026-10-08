@@ -209,7 +209,8 @@ async function handleFile(file) {
     const data = await res.json();
     jobId = data.job_id;
     position = data.position || 0;
-    downloadName = file.name.replace(/\.[^.]+$/, "") + ".md";
+    // The server decides the name; empty falls back to its Content-Disposition.
+    downloadName = data.download_name || "";
     appendLog(`> Job ${jobId.slice(0, 8)} encolado (posición ${position})`);
   } catch (err) {
     return { ok: false, error: err.message };
