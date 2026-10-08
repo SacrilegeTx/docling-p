@@ -151,7 +151,9 @@ The fastest path for non-technical users:
 
 The launcher starts a local server on `http://localhost:8000` and opens your
 default browser. Drag one or more documents onto the drop zone, watch the progress, and
-each converted `.md` downloads automatically when its conversion finishes.
+each converted `.md` downloads automatically when its conversion finishes,
+named `<name>.<ext>.md` (for example `report.pdf` → `report.pdf.md`), like the CLI
+and batch mode.
 
 The server is local-only (`127.0.0.1`) — no files leave your machine.
 

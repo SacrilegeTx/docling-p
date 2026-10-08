@@ -30,6 +30,7 @@ from core import (
     normalize_extensions,
     plan_batch,
 )
+from output_paths import markdown_output_name
 from static_files import NoCacheStaticFiles
 
 
@@ -272,7 +273,8 @@ async def convert(
     job_id = uuid.uuid4().hex
     staging_dir = Path(tempfile.mkdtemp(prefix=f"docling-{job_id}-"))
     input_path = staging_dir / filename
-    output_path = staging_dir / (Path(filename).stem + ".md")
+    download_name = markdown_output_name(Path(filename))
+    output_path = staging_dir / download_name
 
     with open(input_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
@@ -298,7 +300,12 @@ async def convert(
         ))
 
     job_queue.put(job_id)
-    return {"job_id": job_id, "filename": filename, "position": ahead}
+    return {
+        "job_id": job_id,
+        "filename": filename,
+        "download_name": download_name,
+        "position": ahead,
+    }
 
 
 @app.get("/progress/{job_id}")
@@ -348,7 +355,7 @@ async def download(job_id: str) -> FileResponse:
     return FileResponse(
         job.output_path,
         media_type="text/markdown",
-        filename=Path(job.filename).stem + ".md",
+        filename=job.output_path.name,
         background=BackgroundTask(cleanup),
     )
 
