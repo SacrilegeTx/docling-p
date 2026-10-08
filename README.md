@@ -462,6 +462,7 @@ uv run pytest
 ├── main.py            # CLI wrapper
 ├── webapp.py          # FastAPI web UI backend (upload, SSE progress, download)
 ├── static_files.py    # Static file handler that forces revalidation (`no-cache`)
+├── xlsx_markdown.py   # XLSX to Markdown conversion with pandas (kept free of docling imports)
 ├── static/
 │   ├── index.html     # Web UI markup
 │   └── app.js         # Drag-and-drop, SSE handling, options form
