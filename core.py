@@ -20,6 +20,7 @@ from docling.datamodel.pipeline_options import (
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
+from output_paths import markdown_output_name, resolve_paths
 from xlsx_markdown import convert_xlsx_to_markdown
 
 
@@ -77,22 +78,6 @@ def ensure_environment() -> None:
             "Configurala en un archivo .env o en tu entorno."
         )
     os.environ["HF_TOKEN"] = token
-
-
-def resolve_paths(input_path: Path, output_path: Path | None) -> tuple[Path, Path]:
-    source_path = input_path.expanduser().resolve()
-
-    if not source_path.exists():
-        raise FileNotFoundError(f"No existe el archivo de entrada: {source_path}")
-
-    if not source_path.is_file():
-        raise ValueError(f"La ruta de entrada no es un archivo: {source_path}")
-
-    resolved_output_path = output_path or source_path.with_suffix(".md")
-    resolved_output_path = resolved_output_path.expanduser().resolve()
-    resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    return source_path, resolved_output_path
 
 
 def build_pdf_converter(options: ConversionOptions) -> DocumentConverter:
@@ -512,7 +497,7 @@ def resolve_batch_output(pdf: Path, output_root: Path) -> Path:
         bucket = "_root"
     # Conservar la extensión original en el output así "X.pdf" y "X.xlsx"
     # no colisionan en "X.md". Resultado: "X.pdf.md", "X.xlsx.md", ...
-    return output_root / bucket / f"{pdf.name}.md"
+    return output_root / bucket / markdown_output_name(pdf)
 
 
 def default_batch_output_root(root: Path) -> Path:
