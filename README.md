@@ -443,6 +443,15 @@ document reconstruction:
 - The web UI processes one job at a time on purpose — see
   [Concurrency](#concurrency).
 
+## Running tests
+
+The test suite uses `pytest` and does not import the conversion engine, so it
+runs quickly:
+
+```bash
+uv run pytest
+```
+
 ## Project structure
 
 ```text
@@ -450,9 +459,11 @@ document reconstruction:
 ├── core.py            # Pure conversion logic + ConversionOptions + ProgressEvent
 ├── main.py            # CLI wrapper
 ├── webapp.py          # FastAPI web UI backend (upload, SSE progress, download)
+├── static_files.py    # Static file handler that forces revalidation (`no-cache`)
 ├── static/
 │   ├── index.html     # Web UI markup
 │   └── app.js         # Drag-and-drop, SSE handling, options form
+├── tests/             # pytest suite (`uv run pytest`)
 ├── start.bat          # Windows double-click launcher
 ├── start.sh           # Unix shell launcher
 ├── pyproject.toml     # Project metadata and dependencies
