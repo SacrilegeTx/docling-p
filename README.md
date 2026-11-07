@@ -41,10 +41,19 @@ blocks. See [Post-processing pipeline](#post-processing-pipeline).
 - `.pptx`
 - `.html`, `.htm`
 - `.md`
+- `.png` (always converted with OCR, see below)
 - other formats supported by the installed Docling version
 
 PDF files receive special handling because large tables can make full-document
-conversion expensive. Other formats are sent directly to Docling.
+conversion expensive. Spreadsheets are converted with pandas and PNG images
+always go through OCR; other formats are sent directly to Docling.
+
+PNG images have no text layer, so OCR is always on for them, regardless of the
+`--ocr` flag or the web UI toggle. They use RapidOCR's Latin-script recognizer
+(the default one is trained for Chinese/English and drops Spanish accents), and
+text the layout model nests inside a detected picture is kept in the Markdown
+instead of being reduced to `<!-- image -->`. Expect about a minute per image
+on CPU; the first image also downloads the OCR models.
 
 ## Requirements
 
@@ -233,7 +242,7 @@ when it does not exist.
 | `--output`, `-o`  | input file name plus `.md` (`input.pdf` → `input.pdf.md`) | Path to the Markdown file to create. |
 | `--chunk-size`    | `1`     | Pages per chunk when processing PDFs. Higher = less overhead, more RAM. |
 | `--max-retries`   | `2`     | Retries per chunk on transient errors. |
-| `--ocr`           | off     | Enable OCR. Costly; only useful for scanned PDFs without embedded text. |
+| `--ocr`           | off     | Enable OCR for scanned PDFs or PDFs made of screenshots; text inside images is kept. Costly (about a minute per page on CPU). PNG images always use OCR. |
 | `--table-mode`    | `fast`  | Table detection mode (`fast` or `accurate`). |
 | `--threads`       | `1`     | Threads for the CPU accelerator. |
 
@@ -267,9 +276,15 @@ options panel):
   single failure (the whole chunk needs retrying).
 - `max_retries` (default `2`): how many times a failed chunk is retried
   before the conversion aborts.
-- `do_ocr` (default off): enable OCR for scanned PDFs. Disabled by default
-  because RapidOCR uses substantial memory and adds no value when the PDF
-  already contains embedded text.
+- `do_ocr` (default off): enable OCR for scanned PDFs or PDFs whose content is
+  mostly screenshots. It uses RapidOCR's Latin-script recognizer, and the text
+  read inside pictures is written to the Markdown under each
+  `<!-- image -->` placeholder (without OCR, pictures stay placeholders only).
+  Disabled by default because it is slow (about a minute per page on CPU),
+  uses substantial memory, and adds no value when the PDF already contains
+  embedded text. Text from screenshots comes line by line, and small or
+  low-resolution text may be misread. PNG images ignore this option: they
+  always use OCR.
 - `table_mode` (default `fast`): TableFormer mode. `fast` is the
   stability-first choice for large born-digital PDFs with many tables.
   `accurate` reconstructs complex tables better at the cost of speed and
@@ -289,7 +304,7 @@ only when you understand the trade-offs:
 - Switch `table_mode` to `accurate` only when table quality matters more than
   runtime and memory.
 - Enable `do_ocr` only for scanned PDFs where text is not embedded in the
-  document.
+  document, or for PDFs whose information lives in screenshots.
 
 If the document is already text-based, OCR and heavier table analysis can add
 cost without improving the Markdown enough to justify the risk.
@@ -442,7 +457,9 @@ document reconstruction:
 
 - Complex PDF layouts may still require manual Markdown cleanup, even after
   the post-processing pipeline.
-- Scanned PDFs need `--ocr` (CLI) or the OCR toggle (web UI) enabled.
+- Scanned PDFs, and PDFs whose text lives in screenshots, need `--ocr` (CLI)
+  or the OCR toggle (web UI) enabled; otherwise pictures become
+  `<!-- image -->` placeholders.
 - Non-PDF files are converted directly and don't have chunk-level retry
   logic.
 - Very large documents can still take time to process.
@@ -468,6 +485,7 @@ uv run pytest
 ├── output_paths.py    # Shared `<name>.<ext>.md` output naming and CLI path resolution (kept free of docling imports)
 ├── static_files.py    # Static file handler that forces revalidation (`no-cache`)
 ├── xlsx_markdown.py   # XLSX to Markdown conversion with pandas (kept free of docling imports)
+├── ocr_markdown.py    # Markdown export keeping OCR text found inside pictures (kept free of docling imports)
 ├── static/
 │   ├── index.html     # Web UI markup
 │   └── app.js         # Drag-and-drop, SSE handling, options form

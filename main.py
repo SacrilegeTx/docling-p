@@ -63,7 +63,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ocr",
         action="store_true",
-        help="Habilita OCR. Costoso en RAM; usar solo con PDFs escaneados.",
+        help="Habilita OCR para PDFs escaneados o con capturas de pantalla: "
+        "también extrae el texto de las imágenes. Costoso en RAM y lento "
+        "(~1 min por página). Las imágenes (.png) siempre usan OCR.",
     )
     parser.add_argument(
         "--table-mode",

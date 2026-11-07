@@ -30,11 +30,12 @@ from core import (
     normalize_extensions,
     plan_batch,
 )
+from ocr_markdown import IMAGE_EXTENSIONS
 from output_paths import markdown_output_name
 from static_files import NoCacheStaticFiles
 
 
-SUPPORTED_EXTS = {".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm", ".md"}
+SUPPORTED_EXTS = {".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm", ".md"} | IMAGE_EXTENSIONS
 STATIC_DIR = Path(__file__).parent / "static"
 VALID_OPTION_KEYS = {"chunk_size", "max_retries", "do_ocr", "table_mode", "num_threads"}
 

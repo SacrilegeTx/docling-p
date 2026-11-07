@@ -15,11 +15,17 @@ from docling.datamodel.accelerator_options import AcceleratorDevice, Accelerator
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
+    RapidOcrOptions,
     TableFormerMode,
     TableStructureOptions,
 )
-from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.document_converter import (
+    DocumentConverter,
+    ImageFormatOption,
+    PdfFormatOption,
+)
 
+from ocr_markdown import IMAGE_EXTENSIONS, document_markdown, image_markdown
 from output_paths import markdown_output_name, resolve_paths
 from xlsx_markdown import convert_xlsx_to_markdown
 
@@ -80,9 +86,29 @@ def ensure_environment() -> None:
     os.environ["HF_TOKEN"] = token
 
 
-def build_pdf_converter(options: ConversionOptions) -> DocumentConverter:
+def _latin_ocr_options() -> RapidOcrOptions:
+    """RapidOCR with its Latin-script recognizer.
+
+    RapidOCR's default recognizer is trained for Chinese/English and drops
+    Spanish accents and word spacing. RapidOCR only accepts enum values here,
+    and it is imported lazily so loading `core` stays as fast as before.
+    """
+    from rapidocr import LangRec, OCRVersion
+
+    return RapidOcrOptions(
+        backend="torch",
+        rapidocr_params={
+            "Rec.lang_type": LangRec.LATIN,
+            "Rec.ocr_version": OCRVersion.PPOCRV4,
+        },
+    )
+
+
+def _pipeline_options(options: ConversionOptions, *, force_ocr: bool = False) -> PdfPipelineOptions:
     pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = options.do_ocr
+    pipeline_options.do_ocr = force_ocr or options.do_ocr
+    if pipeline_options.do_ocr:
+        pipeline_options.ocr_options = _latin_ocr_options()
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options = TableStructureOptions(
         do_cell_matching=True,
@@ -92,10 +118,24 @@ def build_pdf_converter(options: ConversionOptions) -> DocumentConverter:
         num_threads=options.num_threads,
         device=AcceleratorDevice.CPU,
     )
+    return pipeline_options
 
+
+def build_pdf_converter(options: ConversionOptions) -> DocumentConverter:
     return DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            InputFormat.PDF: PdfFormatOption(pipeline_options=_pipeline_options(options))
+        }
+    )
+
+
+def build_image_converter(options: ConversionOptions) -> DocumentConverter:
+    """Build a converter for images: OCR is always on, whatever `do_ocr` says."""
+    return DocumentConverter(
+        format_options={
+            InputFormat.IMAGE: ImageFormatOption(
+                pipeline_options=_pipeline_options(options, force_ocr=True)
+            )
         }
     )
 
@@ -281,13 +321,14 @@ def convert_chunk_with_retries(
     page_label: str,
     max_retries: int,
     on_progress: ProgressCallback,
+    keep_picture_text: bool = False,
 ) -> str:
     last_error = None
 
     for attempt in range(1, max_retries + 2):
         try:
             result = converter.convert(str(chunk_path))
-            md = result.document.export_to_markdown()
+            md = document_markdown(result.document, keep_picture_text)
             md = denormalize_flattened_tables(md)
             md = format_xml_blocks(md)
             return md + "\n\n"
@@ -358,6 +399,7 @@ def convert_pdf_to_markdown(
                     page_label=label,
                     max_retries=options.max_retries,
                     on_progress=on_progress,
+                    keep_picture_text=options.do_ocr,
                 )
 
                 with open(incremental_output_path, "a", encoding="utf-8") as f:
@@ -388,6 +430,17 @@ def convert_document_to_markdown(source_path: Path, output_path: Path) -> None:
     output_path.write_text(md + "\n", encoding="utf-8")
 
 
+def convert_image_to_markdown(
+    source_path: Path,
+    output_path: Path,
+    options: ConversionOptions,
+) -> None:
+    md = image_markdown(build_image_converter(options), source_path)
+    md = denormalize_flattened_tables(md)
+    md = format_xml_blocks(md)
+    output_path.write_text(md + "\n", encoding="utf-8")
+
+
 def convert_to_markdown(
     source_path: Path,
     output_path: Path,
@@ -406,6 +459,12 @@ def convert_to_markdown(
             message=f"Convirtiendo {source_path.name} (pandas)...",
         ))
         convert_xlsx_to_markdown(source_path, output_path)
+    elif ext in IMAGE_EXTENSIONS:
+        progress(ProgressEvent(
+            kind="info",
+            message=f"Convirtiendo {source_path.name} (OCR)...",
+        ))
+        convert_image_to_markdown(source_path, output_path, opts)
     else:
         progress(ProgressEvent(
             kind="info",
@@ -443,7 +502,7 @@ def is_wsl_windows_mount(path: Path) -> bool:
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
     ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx", ".html", ".htm", ".md",
-})
+}) | IMAGE_EXTENSIONS
 
 
 def normalize_extensions(exts: list[str] | set[str] | None) -> set[str]:
